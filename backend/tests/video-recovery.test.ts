@@ -18,8 +18,23 @@ const { db, schema } = await import('../src/db/index.ts')
 const { generateVideo, recoverVideoTask, resumeInterruptedTasks } = await import('../src/services/generation.ts')
 const tasksRoute = (await import('../src/routes/tasks.ts')).default
 let submissionCount = 0, downloads = 0, recoveryCalls = 0, available = false, brokenResponse = false
+let holdSubmission = false, holdDownload = false
+let heldResponse: http.ServerResponse | undefined
+let nihapiContentAuth: string | undefined
+let nihapiCdnAuth: string | undefined
 const video = Buffer.concat([Buffer.from([0,0,0,24]), Buffer.from('ftypisom'), Buffer.alloc(32)])
 const server = http.createServer((req, res) => {
+  if (req.url === '/v1/videos/nihapi-1') { res.end(JSON.stringify({ id: 'nihapi-1', status: 'completed', seconds: 5 })); return }
+  if (req.url === '/v1/videos/nihapi-1/content') {
+    nihapiContentAuth = req.headers.authorization
+    if (nihapiContentAuth !== 'Bearer nihapi-secret') { res.writeHead(401).end(); return }
+    res.end(video); return
+  }
+  if (req.url === '/cdn-video') { nihapiCdnAuth = req.headers.authorization; res.end(video); return }
+  if ((holdSubmission && req.method === 'POST') || (holdDownload && req.url === '/content')) {
+    heldResponse = res
+    return
+  }
   if (req.method === 'POST' && req.url?.endsWith('/recover')) { recoveryCalls++; res.end('{}'); return }
   if (req.url?.startsWith('/v2/query/')) { res.end(JSON.stringify({ task: { id:'upstream-1', status:'succeeded', duration:12, content:{url:base+'/content'} } })); return }
   if (req.url === '/expired') { res.writeHead(403).end(); return }
@@ -103,4 +118,62 @@ test('response header preserves recovery ID when response JSON is interrupted; c
   db.update(schema.aiServiceConfigs).set({baseUrl:base}).where(eq(schema.aiServiceConfigs.id,config.id)).run()
 })
 
-test.after(async()=>{ await new Promise<void>(resolve=>server.close(()=>resolve())); await fs.rm(root,{recursive:true,force:true}) })
+test('stop during submission discards late completion and permits a new generation', async () => {
+  brokenResponse = false
+  holdSubmission = true
+  const id = await generateVideo({ storyboardId: sb.id, prompt: 'stop me', configId: config.id, forceNew: true })
+  while (!heldResponse) await new Promise(r => setTimeout(r, 10))
+  const late = heldResponse
+  heldResponse = undefined
+  holdSubmission = false
+  const response = await tasksRoute.request(`/${id}/stop`, { method: 'POST' })
+  assert.equal(response.status, 200)
+  assert.equal(row(id).stage, 'stopped')
+  await assert.rejects(recoverVideoTask(id), /已手动停止/)
+  const next = await generateVideo({ storyboardId: sb.id, prompt: 'new', configId: config.id, forceNew: true })
+  await waitFor(next, 'completed')
+  late.end(JSON.stringify({ task: { id: 'late-upstream', status: 'succeeded', content: { url: base + '/content' } } }))
+  const deadline = Date.now() + 5000
+  while (row(id).taskId !== 'late-upstream' && Date.now() < deadline) await new Promise(r => setTimeout(r, 10))
+  assert.equal(row(id).taskId, 'late-upstream')
+  assert.equal(row(id).errorCode, 'user_cancelled')
+  assert.equal(row(id).status, 'failed')
+  assert.equal(db.select().from(schema.storyboards).where(eq(schema.storyboards.id, sb.id)).get()!.videoUrl, row(next).localPath)
+})
+
+test('stop during download prevents completion and storyboard writeback', async () => {
+  holdDownload = true
+  const previous = db.select().from(schema.storyboards).where(eq(schema.storyboards.id, sb.id)).get()!.videoUrl
+  const id = await generateVideo({ storyboardId: sb.id, prompt: 'stop download', configId: config.id, forceNew: true })
+  while (!heldResponse) await new Promise(r => setTimeout(r, 10))
+  const late = heldResponse
+  heldResponse = undefined
+  holdDownload = false
+  assert.equal((await tasksRoute.request(`/${id}/stop`, { method: 'POST' })).status, 200)
+  late.end(video)
+  await new Promise(r => setTimeout(r, 300))
+  assert.equal(row(id).stage, 'stopped')
+  assert.equal(row(id).errorCode, 'user_cancelled')
+  assert.equal(row(id).localPath, null)
+  assert.equal(db.select().from(schema.storyboards).where(eq(schema.storyboards.id, sb.id)).get()!.videoUrl, previous)
+})
+
+test('NIH API completed task downloads authenticated content; direct CDN results never receive credentials', async () => {
+  const cfg = db.insert(schema.aiServiceConfigs).values({ serviceType: 'video', provider: 'nihapi', name: 'nihapi-test', baseUrl: base,
+    apiKey: 'nihapi-secret', model: '["minimax-h3-base"]', createdAt: ts, updatedAt: ts }).returning().get()
+  const task = db.insert(schema.sysTask).values({ type: 'video', provider: 'nihapi', configId: cfg.id, configBaseUrl: base,
+    taskId: 'nihapi-1', status: 'failed', errorCode: 'poll_failed', createdAt: ts, updatedAt: ts }).returning().get()
+  const before = submissionCount
+  await recoverVideoTask(task.id)
+  const completed = await waitFor(task.id, 'completed')
+  assert.equal(completed.resultUrl, base + '/v1/videos/nihapi-1/content')
+  assert.equal(nihapiContentAuth, 'Bearer nihapi-secret')
+  assert.equal(submissionCount, before)
+  const cdn = db.insert(schema.sysTask).values({ type: 'video', provider: 'nihapi', configId: cfg.id, configBaseUrl: base,
+    taskId: 'nihapi-2', resultUrl: base + '/cdn-video', status: 'failed', errorCode: 'delivery_failed', createdAt: ts, updatedAt: ts }).returning().get()
+  await recoverVideoTask(cdn.id)
+  await waitFor(cdn.id, 'completed')
+  assert.equal(nihapiCdnAuth, undefined)
+})
+
+test.after(async()=>{ await new Promise<void>(resolve=>server.close(()=>resolve())); db.$client.close(); await fs.rm(root,{recursive:true,force:true}) })

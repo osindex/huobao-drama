@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { registerAssetReferenceRoutes } from '../services/asset-reference.js'
 import { and, eq } from 'drizzle-orm'
 import { db, getInsertId, schema } from '../db/index.js'
 import { success, created, badRequest, now } from '../utils/response.js'
@@ -9,6 +10,7 @@ import { ensurePropFinalPrompt } from '../services/final-prompt.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
+registerAssetReferenceRoutes(app, 'prop')
 // 道具图：白底单品静物，方形画布
 const PROP_IMAGE_SIZE = '1024x1024'
 

@@ -39,6 +39,7 @@
         </a>
         <ThemeToggle />
         <LocaleSwitcher />
+        <button v-if="authOn" class="logout-btn" type="button" @click="logout">退出</button>
       </div>
     </header>
 
@@ -58,7 +59,7 @@
 <script setup>
 import { LayoutGrid, Settings, TriangleAlert, Github } from 'lucide-vue-next'
 import { useI18n } from 'vue-i18n'
-import { aiConfigAPI } from '~/composables/useApi'
+import { aiConfigAPI, authAPI } from '~/composables/useApi'
 import brandLogo from '~/assets/brand-logo.png'
 
 const { t, locale } = useI18n()
@@ -83,7 +84,15 @@ async function checkAiConfigs() {
   } catch { /* 配置检查失败不阻塞页面 */ }
 }
 
-onMounted(checkAiConfigs)
+const authOn = ref(false)
+async function logout() {
+  try { await authAPI.logout(); location.assign('/login') }
+  catch { window.alert('退出未完成，请检查网络后重试') }
+}
+onMounted(async () => {
+  checkAiConfigs()
+  try { authOn.value = (await authAPI.status()).enabled } catch { /* 未登录会被接口拦截并跳转 */ }
+})
 // 设置页保存配置后返回时重新检查(布局跨页面复用,onMounted 只触发一次)
 watch(() => route.path, checkAiConfigs)
 // 切换界面语言时横幅中已拼接的类型文案需要重算
@@ -168,8 +177,14 @@ watch(locale, checkAiConfigs)
 /* Header 右侧 — 语言切换器 */
 .header-right {
   margin-left: auto;
-  display: flex; align-items: center;
+  display: flex; align-items: center; gap: 8px;
 }
+.logout-btn {
+  height: 32px; padding: 0 12px; border-radius: var(--radius-pill);
+  border: 1px solid var(--border); background: transparent; color: var(--text-2);
+  font: 600 12px/1 var(--font-body); cursor: pointer;
+}
+.logout-btn:hover { background: var(--bg-hover); color: var(--text-0); }
 /* GitHub 入口 — 与 ThemeToggle 同款圆形图标按钮 */
 .github-link {
   display: flex;

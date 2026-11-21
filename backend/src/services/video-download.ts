@@ -3,6 +3,7 @@ import path from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { STORAGE_ROOT } from '../utils/paths.js'
+import { fetchMediaResponse } from '../utils/media-fetch.js'
 
 export class VideoDownloadError extends Error {
   constructor(public code: string, message: string, public retryable = false) { super(message) }
@@ -20,7 +21,7 @@ export function safeTaskError(error: unknown): string {
 
 /** 下载到临时文件，校验容器头后原子改名；同任务重复恢复不会新增媒体文件。 */
 export async function downloadVideo(url: string, taskId: number, options: {
-  root?: string; attempts?: number; timeoutMs?: number; retryDelayMs?: number; maxBytes?: number
+  root?: string; attempts?: number; timeoutMs?: number; retryDelayMs?: number; maxBytes?: number; headers?: Record<string, string>
 } = {}): Promise<string> {
   const parsed = new URL(url)
   if (!['http:', 'https:'].includes(parsed.protocol)) throw new VideoDownloadError('download_url', 'Invalid video URL protocol')
@@ -32,8 +33,8 @@ export async function downloadVideo(url: string, taskId: number, options: {
   const maxBytes = options.maxBytes ?? 512 * 1024 * 1024
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
-      const signal = AbortSignal.timeout(options.timeoutMs ?? 120_000)
-      const resp = await fetch(url, { signal })
+      const signal = AbortSignal.timeout(options.timeoutMs ?? Number(process.env.MEDIA_DOWNLOAD_TIMEOUT_MS || 120_000))
+      const resp = await fetchMediaResponse(url, signal, options.headers)
       if (!resp.ok) {
         await resp.body?.cancel()
         throw new VideoDownloadError('download_http', `Video download HTTP ${resp.status}`, [408, 429].includes(resp.status) || resp.status >= 500)

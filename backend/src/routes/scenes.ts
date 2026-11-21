@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { registerAssetReferenceRoutes } from '../services/asset-reference.js'
 import { and, eq } from 'drizzle-orm'
 import { db, getInsertId, schema } from '../db/index.js'
 import { success, created, badRequest, now } from '../utils/response.js'
@@ -8,6 +9,7 @@ import { ensureSceneFinalPrompt } from '../services/final-prompt.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
+registerAssetReferenceRoutes(app, 'scene')
 
 // POST /scenes — 手动新增场景（传入 episode_id 时关联到该集）
 app.post('/', async (c) => {

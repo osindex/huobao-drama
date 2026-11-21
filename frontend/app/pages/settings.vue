@@ -749,7 +749,7 @@ const serviceTypes = computed(() => [
   { type: 'image', label: t('common.serviceType.image') },
   { type: 'video', label: t('common.serviceType.video') },
 ])
-const providers = ['comfyui', 'gemini', 'openai', 'volcengine', 'minimax', 'aliyun', 'grok']
+const providers = ['comfyui', 'gemini', 'openai', 'volcengine', 'minimax', 'aliyun', 'grok', 'nihapi']
 const providerSelectOptions = computed(() => providers.map(p => ({ label: p === 'grok' ? 'Grok / xAI' : p, value: p })))
 const serviceMeta = computed(() => ({
   text: { label: t('common.serviceType.text'), desc: t('settings.ai.meta.text') },
@@ -767,6 +767,7 @@ const providerPresets = {
     openai: { label: 'OpenAI 官方', baseUrl: 'https://api.openai.com', models: ['gpt-image-2'] },
   },
   video: {
+    nihapi: { label: 'NIH API（OpenAI 兼容视频）', baseUrl: 'https://nihapi.com/v1', models: ['minimax-h3-base', 'kling-v4.0-flash', 'muse-video-ext'] },
     comfyui: { label: '本地 GB10 · Wan 2.2（静音，单首帧，2–5 秒）', baseUrl: 'http://comfy-bridge:8090', models: ['wan2.2-i2v-14b'] },
     grok: { label: 'Grok / xAI（原生视频接口）', baseUrl: 'https://api.x.ai/v1', models: ['grok-imagine-video-1.5', 'grok-imagine-video', 'grok-imagine-video-1.5-lite'] },
     aliyun: { label: '阿里云百炼 Wan 3.0', baseUrl: 'https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com', models: ['wan3.0-video', 'wan3.0-video-prime'] },

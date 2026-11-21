@@ -1,14 +1,19 @@
 const BASE = '/api/v1'
 
+function redirectToLogin() {
+  if (location.pathname !== '/login') location.assign('/login')
+}
+
 async function req<T = any>(method: string, path: string, body?: any): Promise<T> {
-  const opts: RequestInit = { method, headers: { 'Content-Type': 'application/json' } }
+  const opts: RequestInit = { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' } }
   if (body) opts.body = JSON.stringify(body)
 
   const start = performance.now()
-  console.log(`%c[API] %c${method} %c${path}`, 'color:#888', 'color:#4fc3f7;font-weight:bold', 'color:#ccc', body || '')
+  console.log(`%c[API] %c${method} %c${path}`, 'color:#888', 'color:#4fc3f7;font-weight:bold', 'color:#ccc')
 
   try {
     const resp = await fetch(`${BASE}${path}`, opts)
+    if (resp.status === 401) redirectToLogin()
     const json = await resp.json()
     const ms = Math.round(performance.now() - start)
 
@@ -26,6 +31,11 @@ async function req<T = any>(method: string, path: string, body?: any): Promise<T
     }
     throw err
   }
+}
+
+export const authAPI = {
+  status: () => api.get<{ enabled: boolean }>('/auth/status'),
+  logout: () => api.post('/auth/logout'),
 }
 
 export const api = {
@@ -98,6 +108,7 @@ export const propAPI = {
 
 // 统一生成任务（图片/视频）：POST 带 type 字段，列表按 type 过滤
 export const taskAPI = {
+  stop: (id: number) => api.post(`/tasks/${id}/stop`),
   generate: (d: any) => api.post('/tasks', d),
   recover: (id: number) => api.post(`/tasks/${id}/recover`),
   diagnostics: (id: number) => api.get(`/tasks/${id}/diagnostics`),
@@ -118,7 +129,8 @@ async function uploadReq<T = any>(path: string, file: File): Promise<T> {
   const fd = new FormData()
   fd.append('file', file)
   console.log(`%c[API] %cPOST %c${path} %c${file.name}`, 'color:#888', 'color:#4fc3f7;font-weight:bold', 'color:#ccc', 'color:#888')
-  const resp = await fetch(`${BASE}${path}`, { method: 'POST', body: fd })
+  const resp = await fetch(`${BASE}${path}`, { method: 'POST', body: fd, credentials: 'same-origin' })
+  if (resp.status === 401) redirectToLogin()
   const json = await resp.json()
   if (!resp.ok || (json.code && json.code >= 400)) {
     console.log(`%c[API] %cPOST ${path} %c${resp.status}`, 'color:#888', 'color:#ef5350', 'color:#ef5350;font-weight:bold')

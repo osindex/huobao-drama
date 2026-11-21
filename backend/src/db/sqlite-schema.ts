@@ -391,6 +391,12 @@ export function initSqliteSchema(sqlite: Database.Database) {
     if (!characterColumns.has(name)) sqlite.exec(`ALTER TABLE characters ADD COLUMN ${name} TEXT`)
   }
   const insertSeed = sqlite.prepare(SEED_SQL)
+  for (const table of ['characters', 'scenes', 'props']) {
+    const columns = new Set((sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name))
+    for (const [name, type] of Object.entries({ reference_asset_id: 'INTEGER', reference_note: 'TEXT' })) {
+      if (!columns.has(name)) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`)
+    }
+  }
   const upgradeSeed = sqlite.prepare(UPGRADE_SQL)
   const removeSeed = sqlite.prepare(REMOVE_SQL)
   for (const s of stylePresetSeeds) {

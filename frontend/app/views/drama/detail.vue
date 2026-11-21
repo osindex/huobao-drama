@@ -457,6 +457,8 @@
             </div>
 
             <!-- 最终提示词：可生成 / 重新生成 / 手动编辑 -->
+            <AssetReference :key="`${editTarget.kindKey}:${editTarget.id}`" :kind="editTarget.kindKey" :asset-id="editTarget.id" />
+            <AssetImageModel :key="`model:${editTarget.kindKey}:${editTarget.id}`" v-model="assetImageModelOverride" :disabled="isPending(editTarget)" />
             <section class="mat-detail-prompt-panel">
               <div class="mat-detail-section-title">
                 <span>{{ t('detail.mat.finalPromptLabel') }}</span>
@@ -497,7 +499,7 @@
               <button
                 class="btn"
                 :disabled="isPending(editTarget)"
-                @click="generateMaterial(editTarget)"
+                @click="generateMaterial(editTarget, assetImageModelOverride)"
               >
                 {{ matHasImage(editTarget) ? t('episode.sb.regenPrompt') : (isPending(editTarget) ? t('episode.asset.generating') + '…' : t('detail.mat.genImage')) }}
               </button>
@@ -753,16 +755,16 @@ function isPending(m) { return pendingMaterials.value.has(pendingKey(m)) }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
 
-async function generateMaterial(m) {
+async function generateMaterial(m, modelOverride = null) {
   const epId = drama.value?.episodes?.[0]?.id
   if (!epId) { toast.error(t('detail.mat.needEpisodeForImage')); return }
   const key = pendingKey(m)
   if (pendingMaterials.value.has(key)) return
   pendingMaterials.value = new Set(pendingMaterials.value).add(key)
   try {
-    if (m.kindKey === 'character') await characterAPI.generateImage(m.id, epId)
-    else if (m.kindKey === 'scene') await sceneAPI.generateImage(m.id, epId)
-    else await propAPI.generateImage(m.id, epId)
+    if (m.kindKey === 'character') await characterAPI.generateImage(m.id, epId, modelOverride?.model, modelOverride?.configId)
+    else if (m.kindKey === 'scene') await sceneAPI.generateImage(m.id, epId, modelOverride?.model, modelOverride?.configId)
+    else await propAPI.generateImage(m.id, epId, modelOverride?.model, modelOverride?.configId)
     toast.success(t('detail.mat.generating', { kind: m.kind, name: m.name }))
     pollMaterial(m)
   } catch (e) {
@@ -855,7 +857,9 @@ function updateCharacterVoice(id, voice) {
 }
 const editDraft = reactive({})
 
+const assetImageModelOverride = ref(null)
 function openEdit(m) {
+  assetImageModelOverride.value = null
   editTarget.value = m
   // 按类型初始化 draft
   Object.keys(editDraft).forEach(k => delete editDraft[k])

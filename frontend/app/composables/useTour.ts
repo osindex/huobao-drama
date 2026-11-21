@@ -32,7 +32,7 @@ export function hydrateTours(): Promise<void> {
   if (hydratePromise) return hydratePromise
   hydratePromise = (async () => {
     try {
-      const res = await fetch('/api/v1/settings/tours-seen')
+      const res = await fetch('/api/v1/settings/tours-seen', { credentials: 'same-origin' })
       const json = await res.json().catch(() => null)
       const server: string[] = Array.isArray(json?.data?.seen) ? json.data.seen : []
       seenSet = new Set([...server, ...readLocal()])
@@ -60,6 +60,7 @@ export function markTourSeen(id: string) {
       seenSet.add(id)
       await fetch('/api/v1/settings/tours-seen', {
         method: 'PUT',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ seen: [...seenSet] }),
       })

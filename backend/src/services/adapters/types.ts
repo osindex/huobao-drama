@@ -48,6 +48,9 @@ export interface ImageProviderAdapter {
 export interface VideoProviderAdapter {
   provider: string
 
+  /** Some OpenAI-compatible gateways expose authenticated /videos/:id/content. */
+  buildDownloadRequest?(config: AIConfig, taskId: string): ProviderRequest
+
   buildGenerateRequest(config: AIConfig, record: VideoGenerationRecord): ProviderRequest
 
   parseGenerateResponse(result: any): VideoGenResponse

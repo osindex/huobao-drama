@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { registerAssetReferenceRoutes } from '../services/asset-reference.js'
 import { bodyLimit } from 'hono/body-limit'
 import { and, eq, isNull } from 'drizzle-orm'
 import fs from 'node:fs/promises'
@@ -13,6 +14,7 @@ import { ensureCharacterFinalPrompt } from '../services/final-prompt.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
+registerAssetReferenceRoutes(app, 'character')
 const CHARACTER_IMAGE_SIZE = '1920x1080'
 
 // 用户上传的角色音色样本独立于生图和 AI 提取，跨剧集复用同一个角色绑定。

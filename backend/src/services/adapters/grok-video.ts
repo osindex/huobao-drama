@@ -50,6 +50,9 @@ export class GrokVideoAdapter implements VideoProviderAdapter {
   }
 
   parsePollResponse(result: any): VideoPollResponse {
+    if (result.code === 'imagine:content-moderated' || result.error?.code === 'imagine:content-moderated') {
+      return { status: 'failed', error: '生成视频未通过上游内容审核，请修改分镜内容后重新生成' }
+    }
     if (result.status === 'done') {
       if (result.video?.respect_moderation === false || !result.video?.url) return { status: 'failed', error: 'Grok 已结束但未提供可用视频' }
       return { status: 'completed', videoUrl: result.video.url, duration: result.video.duration }

@@ -40,6 +40,8 @@ function messageOf(err: unknown): string {
 export function mapError(err: unknown, opts?: { fallback?: string }): string {
   const msg = messageOf(err).trim()
   if (!msg) return opts?.fallback ? t(opts.fallback) : t('errors.unknown')
+  if (/本地请求体预检未通过|参考图片请求体过大，请配置公网/.test(msg)) return '参考图片超过本地请求体上限，尚未提交；请使用公网图片地址或调整请求体上限'
+  if (/length limit exceeded|request body too large|中转站拒绝请求：参考图片请求体超过大小限制/i.test(msg)) return '参考图片请求体过大，中转站拒绝接收；请优化图片传输或提高请求体上限'
 
   if (NETWORK_RE.test(msg)) return t('errors.network')
   if (err instanceof SyntaxError || NONJSON_RE.test(msg)) return t('errors.server')

@@ -25,6 +25,9 @@ test('invalid combinations fail before submission rather than dropping assets', 
 })
 
 test('async lifecycle parses native IDs, output and terminal errors', () => {
+  assert.deepEqual(adapter.parsePollResponse({ code: 'imagine:content-moderated', error: 'Generated video rejected by content moderation.' }), {
+    status: 'failed', error: '生成视频未通过上游内容审核，请修改分镜内容后重新生成',
+  })
   assert.deepEqual(adapter.parseGenerateResponse({ request_id: 'abc' }), { isAsync: true, taskId: 'abc' })
   assert.equal(adapter.buildPollRequest(config, 'abc/def').url, 'https://relay.example/xai/v1/videos/abc%2Fdef')
   assert.equal(adapter.parsePollResponse({ status: 'pending' }).status, 'processing')

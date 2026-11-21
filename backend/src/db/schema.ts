@@ -44,6 +44,8 @@ export const episodes = sqliteTable('episodes', {
 })
 
 export const characters = sqliteTable('characters', {
+  referenceAssetId: integer('reference_asset_id'),
+  referenceNote: text('reference_note'),
   id: integer('id').primaryKey({ autoIncrement: true }),
   dramaId: integer('drama_id').notNull(),
   name: text('name').notNull(),
@@ -90,6 +92,8 @@ export const episodeProps = sqliteTable('episode_props', {
 })
 
 export const scenes = sqliteTable('scenes', {
+  referenceAssetId: integer('reference_asset_id'),
+  referenceNote: text('reference_note'),
   id: integer('id').primaryKey({ autoIncrement: true }),
   dramaId: integer('drama_id').notNull(),
   episodeId: integer('episode_id'),
@@ -247,6 +251,8 @@ export const videoMerges = sqliteTable('video_merges', {
 })
 
 export const props = sqliteTable('props', {
+  referenceAssetId: integer('reference_asset_id'),
+  referenceNote: text('reference_note'),
   id: integer('id').primaryKey({ autoIncrement: true }),
   dramaId: integer('drama_id').notNull(),
   name: text('name').notNull(),

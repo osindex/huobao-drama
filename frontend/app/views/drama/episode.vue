@@ -66,6 +66,7 @@
             {{ t('episode.topbar.tasks') }}
             <span v-if="genTaskActiveCount" class="task-drawer-badge">{{ genTaskActiveCount }}</span>
           </button>
+          <button v-if="authOn" class="btn" type="button" @click="logout">退出</button>
         </div>
       </div>
     </header>
@@ -602,11 +603,13 @@
                   </div>
                   <button
                     class="btn btn-icon btn-sm video-task-action"
-                    :title="videoTaskActionLabel(task.storyboard)"
-                    :disabled="videoTaskState(task.storyboard) === 'pending'"
-                    @click.stop="genVid(task.storyboard)"
+                    :title="isPendingVideo(task.id) ? '停止当前任务' : videoTaskActionLabel(task.storyboard)"
+                    @click.stop="isPendingVideo(task.id) ? stopVideo(task.storyboard) : genVid(task.storyboard)"
                   >
+                    <span v-if="isPendingVideo(task.id)">停止</span>
+                    <template v-else>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                    </template>
                   </button>
                 </div>
                 </div>
@@ -1175,6 +1178,10 @@
 
                 <div v-else :class="['asset-detail-edit-grid', `asset-detail-edit-grid--${assetDetail.type}`]">
                   <label v-if="assetDetail.type === 'character'" class="asset-detail-edit-field">
+                    <span>{{ t('episode.asset.roleLabel') }}</span>
+                    <input v-model="assetDetailDraft.role" class="input" :placeholder="t('episode.create.rolePlaceholder')" />
+                  </label>
+                  <label v-if="assetDetail.type === 'character'" class="asset-detail-edit-field">
                     <span>{{ t('episode.asset.appearanceField') }}</span>
                     <textarea
                       v-model="assetDetailDraft.appearance"
@@ -1215,6 +1222,8 @@
               </section>
             </div>
 
+            <AssetReference :key="`${assetDetail.type}:${assetDetail.item.id}`" :kind="assetDetail.type" :asset-id="assetDetail.item.id" />
+            <AssetImageModel :key="`model:${assetDetail.type}:${assetDetail.item.id}`" v-model="assetImageModelOverride" default-label="沿用顶部图片模型选择" :disabled="isAssetImagePending(assetDetail.type, assetDetail.item.id)" />
             <section class="asset-detail-prompt-panel">
               <div class="asset-detail-section-title">
                 <span>{{ assetDetail.type === 'character' ? t('episode.asset.finalPromptTurnaround') : assetDetail.type === 'scene' ? t('episode.asset.finalPromptFixed') : t('episode.asset.finalPromptWhiteBg') }}</span>
@@ -1280,7 +1289,7 @@
                 v-if="assetDetail.type === 'character'"
                 class="btn"
                 :disabled="isPendingCharImage(assetDetail.item.id)"
-                @click="genCharImg(assetDetail.item.id)"
+                @click="genCharImg(assetDetail.item.id, assetImageModelOverride)"
               >
                 {{ assetImageSrc(assetDetail.item) ? t('episode.asset.regenPortrait') : (isPendingCharImage(assetDetail.item.id) ? t('episode.asset.generating') : t('episode.asset.genPortrait')) }}
               </button>
@@ -1288,7 +1297,7 @@
                 v-else-if="assetDetail.type === 'scene'"
                 class="btn"
                 :disabled="isPendingSceneImage(assetDetail.item.id)"
-                @click="genSceneImg(assetDetail.item.id)"
+                @click="genSceneImg(assetDetail.item.id, assetImageModelOverride)"
               >
                 {{ assetImageSrc(assetDetail.item) ? t('episode.asset.regenScene') : (isPendingSceneImage(assetDetail.item.id) ? t('episode.asset.generating') : t('episode.asset.genScene')) }}
               </button>
@@ -1296,7 +1305,7 @@
                 v-else-if="assetDetail.type === 'prop'"
                 class="btn"
                 :disabled="isPendingPropImage(assetDetail.item.id)"
-                @click="genPropImg(assetDetail.item.id)"
+                @click="genPropImg(assetDetail.item.id, assetImageModelOverride)"
               >
                 {{ assetImageSrc(assetDetail.item) ? t('episode.asset.regenProp') : (isPendingPropImage(assetDetail.item.id) ? t('episode.asset.generating') : t('episode.asset.genProp')) }}
               </button>
@@ -1454,7 +1463,7 @@ import {
   Users, FileText, FolderKanban, Clapperboard, Download, Loader2,
   Plus, X, ListTodo, CircleHelp,
 } from 'lucide-vue-next'
-import { api, dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, propAPI, taskAPI, mergeAPI, aiConfigAPI, uploadAPI } from '~/composables/useApi'
+import { api, authAPI, dramaAPI, episodeAPI, storyboardAPI, characterAPI, sceneAPI, propAPI, taskAPI, mergeAPI, aiConfigAPI, uploadAPI } from '~/composables/useApi'
 import { startTour, autoTour } from '~/composables/useTour'
 import { useAgent } from '~/composables/useAgent'
 import { resolveTextModelSelection } from '~/utils/text-model-selection'
@@ -1470,6 +1479,11 @@ const dramaId = Number(route.params.id)
 const episodeNumber = Number(route.params.episodeNumber)
 
 const drama = ref(null), episode = ref(null), chars = ref([]), scenes = ref([]), propItems = ref([]), sbs = ref([]), mergeData = ref(null)
+const authOn = ref(false)
+async function logout() {
+  try { await authAPI.logout(); location.assign('/login') }
+  catch { toast.error('退出未完成，请检查网络后重试') }
+}
 // 工作台面板位置记忆（按剧集隔离）：仅页面刷新(reload)时恢复到上次所在步骤；
 // 从列表/详情页点击进入时始终默认「剧本」面板
 const PANEL_STORE_KEY = `huobao:workbench:panel:${dramaId}:${episodeNumber}`
@@ -1660,7 +1674,7 @@ function updateCharacterVoice(id, voice) {
   if (character) Object.assign(character, patch)
   if (assetDetail.value.type === 'character' && assetDetail.value.item?.id === id) Object.assign(assetDetail.value.item, patch)
 }
-const assetDetailDraft = ref({ appearance: '', styling: '', prompt: '', lighting: '', description: '' })
+const assetDetailDraft = ref({ role: '', appearance: '', styling: '', prompt: '', lighting: '', description: '' })
 // 最终提示词手动编辑：dirty 时才随保存提交，避免无修改保存误清空 Agent 生成的提示词
 const assetPromptDraft = ref('')
 const assetPromptDirty = ref(false)
@@ -1679,10 +1693,13 @@ function closeImageViewer() {
   imageViewer.value = { open: false, src: '', title: '' }
 }
 
+const assetImageModelOverride = ref(null)
 function openAssetDetail(type, item) {
+  assetImageModelOverride.value = null
   if (!item) return
   assetDetail.value = { open: true, type, item }
   assetDetailDraft.value = {
+    role: item.role || '',
     appearance: item.appearance || '',
     styling: item.styling || '',
     prompt: item.prompt || (type === 'prop' ? '' : item.description) || '',
@@ -1695,7 +1712,7 @@ function openAssetDetail(type, item) {
 
 function closeAssetDetail() {
   assetDetail.value = { open: false, type: '', item: null }
-  assetDetailDraft.value = { appearance: '', styling: '', prompt: '', lighting: '', description: '' }
+  assetDetailDraft.value = { role: '', appearance: '', styling: '', prompt: '', lighting: '', description: '' }
   assetPromptDraft.value = ''
   assetPromptDirty.value = false
 }
@@ -1861,6 +1878,7 @@ async function saveAssetDetail() {
   const payload = {}
   let infoChanged = false
   if (detail.type === 'character') {
+    if (assetDetailDraft.value.role !== (item.role || '')) payload.role = assetDetailDraft.value.role
     if (assetDetailDraft.value.appearance !== (item.appearance || '')) payload.appearance = assetDetailDraft.value.appearance
     if (assetDetailDraft.value.styling !== (item.styling || '')) payload.styling = assetDetailDraft.value.styling
   } else if (detail.type === 'scene') {
@@ -1881,9 +1899,9 @@ async function saveAssetDetail() {
     if (detail.type === 'character') await characterAPI.update(item.id, payload)
     else if (detail.type === 'scene') await sceneAPI.update(item.id, payload)
     else await propAPI.update(item.id, payload)
-    // 本地同步：手动编辑的提示词以草稿为准；仅信息字段变更时提示词已被后端置空
+    // 后端保留已保存的最终提示词；只有明确编辑提示词时才更新。
     const { final_prompt, ...infoPatch } = payload
-    const promptValue = assetPromptDirty.value ? (payload.final_prompt || null) : (infoChanged ? null : (item.final_prompt || item.finalPrompt || null))
+    const promptValue = assetPromptDirty.value ? (payload.final_prompt || null) : (item.final_prompt || item.finalPrompt || null)
     Object.assign(item, infoPatch, { final_prompt: promptValue, finalPrompt: promptValue })
     const list = detail.type === 'character' ? chars.value : detail.type === 'scene' ? scenes.value : propItems.value
     const target = list.find(x => x.id === item.id)
@@ -1953,6 +1971,7 @@ function handleImageViewerKeydown(event) {
 
 onMounted(() => {
   window.addEventListener('keydown', handleImageViewerKeydown)
+  authAPI.status().then(s => { authOn.value = Boolean(s?.enabled) }).catch(() => {})
 })
 
 onBeforeUnmount(() => {
@@ -1993,7 +2012,7 @@ const recoverableVideoCount = computed(() => sbs.value.filter(sb => canRecoverVi
 function canRecoverVideo(id) {
   const task = latestVideoTask(id)
   return !!task && task.status === 'failed' && task.error_code !== 'generation_failed'
-    && !!(task.task_id || task.result_url)
+    && task.error_code !== 'user_cancelled' && !!(task.task_id || task.result_url)
 }
 function videoAwaitingDelivery(sb) {
   const task = latestVideoTask(sb?.id)
@@ -2020,6 +2039,18 @@ async function recoverVideo(sb) {
   const task = latestVideoTask(sb.id)
   if (!task) return
   return recoverTask(task.id, sb.id)
+}
+async function stopVideo(sb) {
+  const task = latestVideoTask(sb.id)
+  if (!task || task.status !== 'processing') return
+  if (!window.confirm('停止本平台对该视频的跟踪和回写？上游可能继续生成并计费。停止后可修改分镜并重新生成。')) return
+  try {
+    await taskAPI.stop(task.id)
+    pendingVideoIds.value = pendingVideoIds.value.filter(id => id !== sb.id)
+    failedVideoMessages.value[sb.id] = '已手动停止，可重新生成'
+    await refresh()
+    toast.success('已停止，可修改分镜后重新生成')
+  } catch (error) { toastError(error) }
 }
 async function recoverTask(taskId, storyboardId) {
   if (isPendingVideo(storyboardId)) return
@@ -2117,6 +2148,7 @@ const lockedVideoConfigId = computed(() => episode.value?.video_config_id || epi
 // 内部统一存 480p/720p/1080p 三档，界面按当前选中的视频模型显示厂商原生档位
 // （Seedance 480p/720p、MiniMax 768P/2K、Wan 3.0 480P/720P/1080P），适配器再映射为官方枚举
 const RESOLUTION_TIERS = {
+  nihapi: ['480p', '720p', '1080p'],
   comfyui: ['480p', '720p'],
   grok: ['480p', '720p', '1080p'],
   volcengine: ['480p', '720p'],
@@ -2124,6 +2156,7 @@ const RESOLUTION_TIERS = {
   aliyun: ['480p', '720p', '1080p'],
 }
 const RESOLUTION_DISPLAY = {
+  nihapi: { '480p': '480p', '720p': '720p / H3 768p', '1080p': '1080p' },
   comfyui: { '480p': '480p', '720p': '720p' },
   grok: { '480p': '480p', '720p': '720p', '1080p': '1080p' },
   volcengine: { '480p': '480p', '720p': '720p', '1080p': '720p' },
@@ -2210,7 +2243,7 @@ const isWan3Video = computed(() => selectedVideoConfig.value?.provider === 'aliy
 
 // 参考图上限（Wan 3.0 官方 10 张，其他模型 9 张），绑定素材收集与 @名字 映射统一读取
 // Grok validates the model-specific limit server-side; never silently drop assets.
-const refImageLimit = computed(() => selectedVideoConfig.value?.provider === 'grok' ? Infinity : isWan3Video.value ? 10 : 9)
+const refImageLimit = computed(() => ['grok', 'nihapi'].includes(selectedVideoConfig.value?.provider) ? Infinity : isWan3Video.value ? 10 : 9)
 
 // 本次生成的生效配置（模型/分辨率/时长），用于右侧小结与批量确认弹窗
 const effectiveVideoModelLabel = computed(() => {
@@ -2367,7 +2400,7 @@ const genTaskRows = computed(() => {
     status: t.status || 'processing',
     errorMsg: t.error_msg || '',
     storyboardId: t.storyboard_id,
-    recoverable: t.type === 'video' && t.error_code !== 'generation_failed' && !!(t.task_id || t.result_url),
+    recoverable: t.type === 'video' && !['generation_failed', 'user_cancelled'].includes(t.error_code) && !!(t.task_id || t.result_url),
     previewUrl: t.local_path || t.result_url || '',
     prompt: t.prompt || '',
     createdAt: t.created_at || '',
@@ -2951,7 +2984,9 @@ function watchAsyncResult(check, attempts = 24, delay = 2500) {
   })()
 }
 
-async function genCharImg(id) {
+async function genCharImg(id, modelOverride = null) {
+  const model = modelOverride?.model || bareModelName(imageModel.value) || undefined
+  const configId = modelOverride?.configId || ownerConfigId(imageModelOptions.value, imageModel.value)
   try {
     if (!isPendingCharImage(id)) pendingCharImageIds.value.push(id)
     const char = chars.value.find(c => c.id === id)
@@ -2961,7 +2996,7 @@ async function genCharImg(id) {
         await ensureAssetPrompt('character', id)
       } catch {} // 提示词生成失败不阻断：后端生图前会再兜底生成或回退本地拼接
     }
-    await characterAPI.generateImage(id, epId.value, bareModelName(imageModel.value) || undefined, ownerConfigId(imageModelOptions.value, imageModel.value), chatModelOverride(), chatConfigId())
+    await characterAPI.generateImage(id, epId.value, model, configId, chatModelOverride(), chatConfigId())
     toast.success(t('episode.image.generatingChar'))
     await refresh()
     watchAsyncResult(() => {
@@ -2993,7 +3028,9 @@ function batchCharImages() {
     toastError(e)
   })
 }
-async function genSceneImg(id) {
+async function genSceneImg(id, modelOverride = null) {
+  const model = modelOverride?.model || bareModelName(imageModel.value) || undefined
+  const configId = modelOverride?.configId || ownerConfigId(imageModelOptions.value, imageModel.value)
   try {
     if (!isPendingSceneImage(id)) pendingSceneImageIds.value.push(id)
     const scene = scenes.value.find(s => s.id === id)
@@ -3003,7 +3040,7 @@ async function genSceneImg(id) {
         await ensureAssetPrompt('scene', id)
       } catch {} // 提示词生成失败不阻断：后端生图前会再兜底生成或回退本地拼接
     }
-    await sceneAPI.generateImage(id, epId.value, bareModelName(imageModel.value) || undefined, ownerConfigId(imageModelOptions.value, imageModel.value), chatModelOverride(), chatConfigId())
+    await sceneAPI.generateImage(id, epId.value, model, configId, chatModelOverride(), chatConfigId())
     toast.success(t('episode.image.generatingScene'))
     await refresh()
     watchAsyncResult(() => {
@@ -3020,7 +3057,9 @@ async function genSceneImg(id) {
 function isPendingPropImage(id) {
   return pendingPropImageIds.value.includes(id)
 }
-async function genPropImg(id) {
+async function genPropImg(id, modelOverride = null) {
+  const model = modelOverride?.model || bareModelName(imageModel.value) || undefined
+  const configId = modelOverride?.configId || ownerConfigId(imageModelOptions.value, imageModel.value)
   try {
     if (!isPendingPropImage(id)) pendingPropImageIds.value.push(id)
     const prop = propItems.value.find(p => p.id === id)
@@ -3030,7 +3069,7 @@ async function genPropImg(id) {
         await ensureAssetPrompt('prop', id)
       } catch {} // 提示词生成失败不阻断：后端生图前会再兜底生成或回退本地拼接
     }
-    await propAPI.generateImage(id, epId.value, bareModelName(imageModel.value) || undefined, ownerConfigId(imageModelOptions.value, imageModel.value), chatModelOverride(), chatConfigId())
+    await propAPI.generateImage(id, epId.value, model, configId, chatModelOverride(), chatConfigId())
     toast.success(t('episode.image.generatingProp'))
     await refresh()
     watchAsyncResult(() => {
@@ -3426,6 +3465,8 @@ async function pollVideoGeneration(generationId, storyboardId) {
     try {
       const res = await taskAPI.get(generationId)
       await refresh()
+      // A stopped task's late response must not clear a newer generation's UI state.
+      if (latestVideoTask(storyboardId)?.id > generationId) return
       if (res?.status === 'completed') {
         pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== storyboardId)
         delete failedVideoMessages.value[storyboardId]
@@ -3439,7 +3480,7 @@ async function pollVideoGeneration(generationId, storyboardId) {
           ...failedVideoMessages.value,
           [storyboardId]: errMsg,
         }
-        toastError(errMsg, { fallback: 'episode.vid.genFailed' })
+        if ((res?.error_code || res?.errorCode) !== 'user_cancelled') toastError(errMsg, { fallback: 'episode.vid.genFailed' })
         return
       }
     } catch {}

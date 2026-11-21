@@ -1,9 +1,10 @@
 import { Hono } from 'hono'
 import { GrokVideoAdapter } from '../services/adapters/grok-video.js'
+import { nihapiVideoProfiles } from '../services/adapters/nihapi-video.js'
 import { and, desc, eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { success, created, badRequest } from '../utils/response.js'
-import { generateImage, generateVideo, recoverVideoTask } from '../services/generation.js'
+import { generateImage, generateVideo, recoverVideoTask, recoverImageTask, stopVideoTask } from '../services/generation.js'
 import { safeTaskError } from '../services/video-download.js'
 import { getActiveConfig, getConfigById } from '../services/ai.js'
 import { getDramaStylePrompt } from '../services/style-preset.js'
@@ -12,9 +13,19 @@ import { logTaskError, logTaskPayload, logTaskStart, logTaskSuccess } from '../u
 
 const app = new Hono()
 
+app.post('/:id/stop', async c => {
+  try {
+    await stopVideoTask(Number(c.req.param('id')))
+    return success(c, { id: Number(c.req.param('id')) })
+  } catch (error) { return badRequest(c, safeTaskError(error)) }
+})
+
 app.post('/:id/recover', async c => {
   try {
-    await recoverVideoTask(Number(c.req.param('id')))
+    const id = Number(c.req.param('id'))
+    const [task] = await db.select().from(schema.sysTask).where(eq(schema.sysTask.id, id))
+    if (task?.type === 'image') await recoverImageTask(id)
+    else await recoverVideoTask(id)
     return success(c, { id: Number(c.req.param('id')) })
   } catch (error) { return badRequest(c, safeTaskError(error)) }
 })
@@ -103,6 +114,13 @@ function validateVideoRequest(body: any, provider?: string): string | null {
   const last = Boolean(body.last_frame_url)
   const file = Boolean(body.file_url)
   const link = Boolean(body.link_url)
+
+  if (provider === 'nihapi') {
+    if (!String(body.prompt || '').trim()) return '视频提示词不能为空'
+    if (body.model && !nihapiVideoProfiles[body.model]) return '尚未适配该 NIH API 视频模型'
+    // Model-specific validation happens after local references are resolved.
+    return null
+  }
 
   if (provider === 'grok') {
     try {

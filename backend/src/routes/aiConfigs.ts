@@ -46,6 +46,10 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
   const p = provider.toLowerCase()
   const m = model || ''
 
+  if (p === 'nihapi') {
+    return { method: 'GET', url: joinProviderUrl(baseUrl, '/v1', '/models'), headers: { ...bearerHeaders(apiKey), 'User-Agent': 'Mozilla/5.0 HuobaoDrama' }, body: undefined }
+  }
+
   if (p === 'comfyui') {
     return { method: 'GET', url: `${baseUrl.replace(/\/+$/, '')}/health`, headers: bearerHeaders(apiKey), body: undefined }
   }

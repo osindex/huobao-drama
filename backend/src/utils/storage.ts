@@ -6,6 +6,7 @@ import path from 'path'
 import sharp from 'sharp'
 import { v4 as uuid } from 'uuid'
 import { STORAGE_ROOT } from './paths.js'
+import { fetchMedia } from './media-fetch.js'
 
 /**
  * 下载远程文件到本地存储
@@ -18,7 +19,7 @@ export async function downloadFile(url: string, subDir: string): Promise<string>
   const filename = `${uuid()}${ext}`
   const filePath = path.join(dir, filename)
 
-  const resp = await fetch(url)
+  const resp = await fetchMedia(url)
   if (!resp.ok) throw new Error(`Download failed: ${resp.status}`)
 
   const buffer = Buffer.from(await resp.arrayBuffer())
@@ -58,10 +59,13 @@ function getExtFromUrl(url: string): string {
  * 获取本地文件的绝对路径
  */
 export function getAbsolutePath(relativePath: string): string {
-  if (relativePath.startsWith('static/')) {
-    return path.join(STORAGE_ROOT, '..', relativePath)
+  const input = relativePath.replace(/^\/?static\//, '')
+  const resolved = path.resolve(STORAGE_ROOT, input)
+  const relative = path.relative(STORAGE_ROOT, resolved)
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error('资源路径必须位于静态资源目录中')
   }
-  return path.join(STORAGE_ROOT, relativePath)
+  return resolved
 }
 
 /**
@@ -137,7 +141,7 @@ export async function fetchImageAsCompressedDataUrl(
     quality?: number
   } = {},
 ): Promise<string> {
-  const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) })
+  const resp = await fetchMedia(url, 30_000)
   if (!resp.ok) throw new Error(`下载参考图失败: HTTP ${resp.status}`)
   return compressImageAsDataUrl(Buffer.from(await resp.arrayBuffer()), options)
 }

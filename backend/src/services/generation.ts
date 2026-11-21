@@ -3,14 +3,17 @@
  * 创建(processing) → 适配器构建请求 → 同步完成或异步轮询 → 下载落盘 → 回写业务表
  */
 import { db, getInsertId, schema } from '../db/index.js'
-import { and, desc, eq, gt } from 'drizzle-orm'
+import { and, desc, eq, gt, sql } from 'drizzle-orm'
 import fs from 'node:fs'
 import { getAbsolutePath } from '../utils/storage.js'
 import { downloadVideo, safeTaskError } from './video-download.js'
 import { prepareReferenceAudio, resolveReferenceAudioUrls } from './reference-audio.js'
 import { getActiveConfig, getConfigById } from './ai.js'
 import { now } from '../utils/response.js'
+import { resolveAssetReference } from './asset-reference.js'
 import { downloadFile, fetchImageAsCompressedDataUrl, generateImageThumb, readImageAsCompressedDataUrl, readImageAsDataUrl, saveBase64Image } from '../utils/storage.js'
+import { prepareGrokImageReference, fitGrokRequestBody } from './grok-image-reference.js'
+import { nihapiVideoProfiles } from './adapters/nihapi-video.js'
 import { extractVideoPoster } from '../utils/video-poster.js'
 import { getImageAdapter, getVideoAdapter } from './adapters/registry'
 import type { AIConfig } from './adapters/types'
@@ -20,6 +23,19 @@ type TaskType = 'image' | 'video'
 
 const activeTasks = new Set<number>()
 const videoSubmissions = new Set<number>()
+async function videoStopped(id: number) {
+  const [task] = await db.select({ errorCode: schema.sysTask.errorCode }).from(schema.sysTask).where(eq(schema.sysTask.id, id))
+  return task?.errorCode === 'user_cancelled'
+}
+
+export async function stopVideoTask(id: number) {
+  const [task] = await db.select().from(schema.sysTask).where(eq(schema.sysTask.id, id))
+  if (!task || task.type !== 'video') throw new Error('视频任务不存在')
+  if (task.status !== 'processing') return
+  await db.update(schema.sysTask).set({ status: 'failed', stage: 'stopped', errorCode: 'user_cancelled',
+    errorMsg: '已手动停止，可修改分镜后重新生成', updatedAt: now() })
+    .where(and(eq(schema.sysTask.id, id), eq(schema.sysTask.status, 'processing')))
+}
 function runBackground(id: number, job: () => Promise<void>) {
   if (activeTasks.has(id)) return
   activeTasks.add(id)
@@ -80,18 +96,24 @@ export async function generateImage(params: GenerateImageParams): Promise<number
     : await getActiveConfig('image')
   if (!config) throw new Error('未配置图片模型，请先到「设置」页添加并启用 AI 服务')
 
+  const reference = params.characterId ? resolveAssetReference('character', params.characterId, params.prompt)
+    : params.sceneId ? resolveAssetReference('scene', params.sceneId, params.prompt)
+      : params.propId ? resolveAssetReference('prop', params.propId, params.prompt) : null
+
   const id = await createTask('image', config, {
     storyboardId: params.storyboardId,
     dramaId: params.dramaId,
     sceneId: params.sceneId,
     characterId: params.characterId,
     propId: params.propId,
-    prompt: params.prompt,
+    prompt: reference?.prompt || params.prompt,
     model: params.model || config.model,
   }, {
     size: params.size || '1920x1080',
     frameType: params.frameType,
-    referenceImages: params.referenceImages,
+    referenceImages: reference?.referenceImages || params.referenceImages,
+    referenceAsset: reference?.referenceAsset,
+    requireReferenceImages: !!reference,
   })
 
   logTaskStart('ImageTask', 'enqueue', {
@@ -219,7 +241,7 @@ function parseTaskParams(raw: string | null | undefined): Record<string, any> {
 async function processTask(id: number, config: AIConfig) {
   try {
     const [record] = await db.select().from(schema.sysTask).where(eq(schema.sysTask.id, id))
-    if (!record) return
+    if (!record || record.errorCode === 'user_cancelled') return
     const type = record.type as TaskType
     const label = taskLabel(type)
     const params = parseTaskParams(record.params)
@@ -236,6 +258,9 @@ async function processTask(id: number, config: AIConfig) {
     if (type === 'image') {
       const adapter = getImageAdapter(config.provider)
       const resolvedReferenceImages = await normalizeReferenceImages(params.referenceImages)
+      if (params.requireReferenceImages && resolvedReferenceImages.length !== params.referenceImages?.length) {
+        throw new Error('参考素材图片读取失败，已停止生成；请检查参考图片，避免失去主体一致性')
+      }
       ;({ url, method, headers, body } = adapter.buildGenerateRequest(config, {
         id: record.id,
         model: record.model,
@@ -259,10 +284,11 @@ async function processTask(id: number, config: AIConfig) {
           size: params.aspectRatio === '9:16' ? '720x1280' : params.aspectRatio === '1:1' ? '1024x1024' : '1280x720',
         })
         params.compositionTaskId = imageTaskId
-        await db.update(schema.sysTask).set({ params: JSON.stringify(params), stage: 'composing' }).where(eq(schema.sysTask.id, id))
+        await db.update(schema.sysTask).set({ params: JSON.stringify(params), stage: 'composing' }).where(and(eq(schema.sysTask.id, id), eq(schema.sysTask.status, 'processing')))
         const deadline = Date.now() + 86_400_000
         let firstFrame: string | null = null
         while (Date.now() < deadline) {
+          if (await videoStopped(id)) return
           const [imageTask] = await db.select().from(schema.sysTask).where(eq(schema.sysTask.id, imageTaskId))
           if (!imageTask || imageTask.status === 'failed') throw new Error(`分镜首帧合成失败：${imageTask?.errorMsg || '任务不存在'}`)
           if (imageTask.status === 'completed') { firstFrame = imageTask.localPath; break }
@@ -273,10 +299,26 @@ async function processTask(id: number, config: AIConfig) {
         params.referenceImageUrls = []
         await db.update(schema.sysTask).set({ params: JSON.stringify(params) }).where(eq(schema.sysTask.id, id))
       }
-      const resolvedImageUrl = await normalizeVideoReferenceUrl(params.imageUrl)
-      const resolvedFirstFrameUrl = await normalizeVideoReferenceUrl(params.firstFrameUrl)
-      const resolvedLastFrameUrl = await normalizeVideoReferenceUrl(params.lastFrameUrl)
-      const resolvedReferenceImageUrls = await normalizeVideoReferenceUrls(params.referenceImageUrls)
+      const normalizeImage = config.provider === 'nihapi'
+        ? async (value: string | null | undefined) => {
+          if (!value) return null
+          const profile = nihapiVideoProfiles[record.model || config.model]
+          if (!profile?.dataImages && /^\/?static\//.test(value)) return resolvePublicMediaUrl(value, 'file')
+          const image = await normalizeVideoReferenceUrl(value)
+          if (!image) throw new Error('参考图片读取失败，已停止生成')
+          return image
+        }
+        : config.provider === 'grok' ? prepareGrokImageReference : normalizeVideoReferenceUrl
+      const resolvedImageUrl = await normalizeImage(params.imageUrl)
+      const resolvedFirstFrameUrl = await normalizeImage(params.firstFrameUrl)
+      const resolvedLastFrameUrl = await normalizeImage(params.lastFrameUrl)
+      const resolvedReferenceImageUrls = ['grok', 'nihapi'].includes(config.provider)
+        ? await Promise.all((params.referenceImageUrls || []).map(async (value: string) => {
+          const image = await normalizeImage(value)
+          if (!image) throw new Error('参考图片为空，请检查分镜素材')
+          return image
+        }))
+        : await normalizeVideoReferenceUrls(params.referenceImageUrls)
       // 视频使用公网地址；短音色按厂商能力使用 data URL 或公网地址。
       const resolvedReferenceVideoUrls = resolvePublicMediaUrls(params.referenceVideoUrls, 'video')
       const resolvedReferenceAudioUrls = await resolveReferenceAudioUrls(params.referenceAudioUrls, config.provider)
@@ -312,17 +354,26 @@ async function processTask(id: number, config: AIConfig) {
       model: record.model,
     })
 
+    if (config.provider === 'grok' && type === 'video') {
+      body = await fitGrokRequestBody(body as Record<string, any>, Number(process.env.GROK_MAX_REQUEST_BYTES || 1048576))
+    }
     const isMultipart = body instanceof FormData
+    const serializedBody = isMultipart ? body as FormData : JSON.stringify(body)
+    if (config.provider === 'grok' && typeof serializedBody === 'string') {
+      const bytes = Buffer.byteLength(serializedBody)
+      logTaskProgress(label, 'request-size', { id, bytes })
+    }
     logTaskPayload(label, 'request payload', {
       id, method, url, headers,
       // multipart 表单（如 OpenAI /v1/images/edits）无法 JSON 化，记录字段摘要
       body: isMultipart ? `[multipart/form-data: ${[...(body as FormData).keys()].join(', ')}]` : body,
     })
 
+    if (type === 'video' && await videoStopped(id)) return
     const resp = await fetch(url, {
       method,
       headers,
-      body: isMultipart ? (body as FormData) : JSON.stringify(body),
+      body: serializedBody,
       signal: AbortSignal.timeout(600_000),
     })
 
@@ -333,8 +384,20 @@ async function processTask(id: number, config: AIConfig) {
       record.taskId = gatewayTaskId
     }
 
-    if (!resp.ok) throw new Error(`API error ${resp.status}: ${await resp.text()}`)
+    if (!resp.ok) {
+      const message = await resp.text()
+      if (resp.status === 413 || /length limit exceeded|request body too large/i.test(message)) {
+        throw new Error('中转站拒绝请求：参考图片请求体超过大小限制')
+      }
+      throw new Error(`API error ${resp.status}: ${message}`)
+    }
     const result = await resp.json() as any
+    if (type === 'video' && await videoStopped(id)) {
+      // Preserve upstream identity for diagnostics without reviving a stopped task.
+      const taskId = getVideoAdapter(config.provider).parseGenerateResponse(result).taskId
+      if (taskId) await db.update(schema.sysTask).set({ taskId }).where(eq(schema.sysTask.id, id))
+      return
+    }
     logTaskPayload(label, 'response payload', { id, provider: config.provider, result })
 
     if (type === 'image') {
@@ -389,16 +452,17 @@ async function processTask(id: number, config: AIConfig) {
 async function markPolling(id: number, taskId: string | undefined) {
   await db.update(schema.sysTask)
     .set({ taskId, stage: 'polling', status: 'processing', updatedAt: now() })
-    .where(eq(schema.sysTask.id, id))
+    .where(and(eq(schema.sysTask.id, id), sql`coalesce(${schema.sysTask.errorCode}, '') != 'user_cancelled'`))
   logTaskProgress('SysTask', 'poll-start', { id, taskId })
 }
 
 async function failTask(id: number, message: string, code?: string) {
+  if (await videoStopped(id)) return
   message = safeTaskError(message)
   logTaskError('SysTask', 'failed', { id, error: message })
   await db.update(schema.sysTask)
     .set({ status: 'failed', errorMsg: safeTaskError(message), ...(code ? { errorCode: code } : {}), updatedAt: now() })
-    .where(eq(schema.sysTask.id, id))
+    .where(and(eq(schema.sysTask.id, id), sql`coalesce(${schema.sysTask.errorCode}, '') != 'user_cancelled'`))
 }
 
 type SysTaskRecord = typeof schema.sysTask.$inferSelect
@@ -421,6 +485,8 @@ async function pollTask(record: SysTaskRecord, config: AIConfig, taskId: string)
     }
     await new Promise(r => setTimeout(r, profile.intervalMs))
     try {
+      const [current] = await db.select({ status: schema.sysTask.status }).from(schema.sysTask).where(eq(schema.sysTask.id, record.id))
+      if (!current || current.status !== 'processing') return
       const { url, method, headers } = adapter.buildPollRequest(config, taskId)
       logTaskProgress(label, 'poll-request', {
         id: record.id,
@@ -438,13 +504,33 @@ async function pollTask(record: SysTaskRecord, config: AIConfig, taskId: string)
         headers,
         signal: AbortSignal.timeout(remainingMs),
       })
-      if (!resp.ok) continue
+      if (await videoStopped(record.id)) { await resp.body?.cancel(); return }
+      if (!resp.ok) {
+        const text = await resp.text()
+        // xAI returns moderation rejection as HTTP 400 instead of a failed status envelope.
+        if (config.provider === 'grok') {
+          let errorBody: any
+          try { errorBody = JSON.parse(text) } catch {}
+          if (errorBody?.code === 'imagine:content-moderated' || errorBody?.error?.code === 'imagine:content-moderated') {
+            const failure = adapter.parsePollResponse(errorBody)
+            await db.update(schema.sysTask).set({ stage: 'failed' }).where(and(eq(schema.sysTask.id, record.id), eq(schema.sysTask.status, 'processing')))
+            await failTask(record.id, failure.error || '生成视频未通过上游内容审核', 'generation_failed')
+            return
+          }
+        }
+        logTaskWarn(label, 'poll-http-error', { id: record.id, status: resp.status, error: safeTaskError(text) })
+        if (resp.status >= 400 && resp.status < 500 && ![408, 429].includes(resp.status)) {
+          await failTask(record.id, `上游任务查询失败：HTTP ${resp.status} ${safeTaskError(text)}`, 'poll_failed')
+          return
+        }
+        continue
+      }
       const result = await resp.json() as any
 
       // 图片/视频 PollResponse 结构不同，这里统一按 any 取值后按 type 分支
       const pollResp: any = adapter.parsePollResponse(result)
       if (type === 'video' && pollResp.stage === 'transferring') {
-        await db.update(schema.sysTask).set({ stage: 'transferring', updatedAt: now() }).where(eq(schema.sysTask.id, record.id))
+        await db.update(schema.sysTask).set({ stage: 'transferring', updatedAt: now() }).where(and(eq(schema.sysTask.id, record.id), eq(schema.sysTask.status, 'processing')))
       }
 
       if (pollResp.status === 'completed') {
@@ -463,16 +549,20 @@ async function pollTask(record: SysTaskRecord, config: AIConfig, taskId: string)
               return
             }
           }
-        } else if (pollResp.videoUrl) {
-          logTaskSuccess(label, 'poll-complete', { id: record.id, taskId, videoUrl: pollResp.videoUrl })
-          await handleVideoComplete(record, pollResp.videoUrl, pollResp.duration)
-          return
+        } else {
+          const downloadRequest = getVideoAdapter(config.provider).buildDownloadRequest?.(config, taskId)
+          const videoUrl = pollResp.videoUrl || downloadRequest?.url
+          if (videoUrl) {
+            logTaskSuccess(label, 'poll-complete', { id: record.id, taskId, videoUrl })
+            await handleVideoComplete(record, videoUrl, pollResp.duration)
+            return
+          }
         }
       }
       if (pollResp.status === 'failed') {
         // 上游明确失败（如内容审核拦截）属终态：立即落库，不重试不等待超时
         const deliveryFailed = /video_transfer_failed/.test(pollResp.error || '')
-        if (deliveryFailed) await db.update(schema.sysTask).set({ stage: 'transferring' }).where(eq(schema.sysTask.id, record.id))
+        if (deliveryFailed) await db.update(schema.sysTask).set({ stage: 'transferring' }).where(and(eq(schema.sysTask.id, record.id), eq(schema.sysTask.status, 'processing')))
         await failTask(record.id, pollResp.error || 'Generation failed', deliveryFailed ? 'delivery_failed' : 'generation_failed')
         return
       }
@@ -490,17 +580,43 @@ async function pollTask(record: SysTaskRecord, config: AIConfig, taskId: string)
 }
 
 async function handleImageComplete(record: SysTaskRecord, imageUrl: string) {
-  const localPath = await downloadFile(imageUrl, 'images')
+  await db.update(schema.sysTask).set({ resultUrl: imageUrl, stage: 'downloading', status: 'processing',
+    errorMsg: null, errorCode: null, updatedAt: now() }).where(eq(schema.sysTask.id, record.id))
+  let localPath: string
+  try {
+    localPath = await downloadFile(imageUrl, 'images')
+  } catch (error) {
+    await failTask(record.id, safeTaskError(error), 'delivery_failed')
+    return
+  }
   // 列表页缩略图（前端按命名约定推导地址，失败不影响主流程）
   await generateImageThumb(localPath)
 
   await db.update(schema.sysTask)
-    .set({ resultUrl: imageUrl, localPath, status: 'completed', completedAt: now(), updatedAt: now() })
+    .set({ resultUrl: imageUrl, localPath, status: 'completed', stage: 'completed', errorMsg: null, errorCode: null, completedAt: now(), updatedAt: now() })
     .where(eq(schema.sysTask.id, record.id))
 
   logTaskSuccess('ImageTask', 'downloaded', { id: record.id, provider: record.provider, localPath })
 
   await writeBackImageAssets(record, localPath)
+}
+
+/** Retry delivery only; never resubmit a paid image generation. */
+export async function recoverImageTask(id: number) {
+  if (activeTasks.has(id)) throw new Error('任务正在运行')
+  const [record] = await db.select().from(schema.sysTask).where(eq(schema.sysTask.id, id))
+  if (!record || record.type !== 'image') throw new Error('图片任务不存在')
+  if (record.status === 'completed') return
+  if (!record.resultUrl) throw new Error('未保存上游图片地址，无法仅恢复下载')
+  const newer = await db.select({ id: schema.sysTask.id }).from(schema.sysTask).where(and(
+    eq(schema.sysTask.type, 'image'), gt(schema.sysTask.id, id),
+    record.characterId ? eq(schema.sysTask.characterId, record.characterId)
+      : record.sceneId ? eq(schema.sysTask.sceneId, record.sceneId)
+      : record.propId ? eq(schema.sysTask.propId, record.propId)
+      : record.storyboardId ? eq(schema.sysTask.storyboardId, record.storyboardId) : eq(schema.sysTask.id, id),
+  )).limit(1)
+  if (newer.length) throw new Error('该素材已有更新的生成任务，请先处理新任务')
+  runBackground(id, () => handleImageComplete(record, record.resultUrl!))
 }
 
 async function handleImageCompleteBase64(record: SysTaskRecord, base64Data: string, mimeType: string) {
@@ -538,18 +654,30 @@ async function writeBackImageAssets(record: SysTaskRecord, localPath: string) {
 }
 
 async function handleVideoComplete(record: SysTaskRecord, videoUrl: string, duration: number | null | undefined) {
+  if (await videoStopped(record.id)) return
   // 先落库地址与实际时长；后续下载失败仍可恢复，且不重新提交生成。
   const params = { ...parseTaskParams(record.params), resultDuration: duration }
-  await db.update(schema.sysTask).set({ resultUrl: videoUrl, params: JSON.stringify(params),
+  const claimed = await db.update(schema.sysTask).set({ resultUrl: videoUrl, params: JSON.stringify(params),
     stage: 'downloading', status: 'processing', errorCode: null, errorMsg: null, updatedAt: now() })
-    .where(eq(schema.sysTask.id, record.id))
+    .where(and(eq(schema.sysTask.id, record.id), sql`coalesce(${schema.sysTask.errorCode}, '') != 'user_cancelled'`)).returning({ id: schema.sysTask.id })
+  if (!claimed.length) return
   try {
+    let downloadHeaders: Record<string, string> | undefined
+    if (getVideoAdapter(record.provider!).buildDownloadRequest && record.taskId) {
+      const config = await recoveryConfig(record)
+      const request = getVideoAdapter(config.provider).buildDownloadRequest!(config, record.taskId)
+      // Only authenticate the exact gateway content endpoint; never send the key to a CDN URL.
+      if (videoUrl === request.url) downloadHeaders = request.headers
+    }
     const localPath = record.localPath && fs.existsSync(getAbsolutePath(record.localPath))
-      ? record.localPath : await downloadVideo(videoUrl, record.id)
-    await db.update(schema.sysTask).set({ localPath, stage: 'saving', updatedAt: now() }).where(eq(schema.sysTask.id, record.id))
+      ? record.localPath : await downloadVideo(videoUrl, record.id, { headers: downloadHeaders })
+    if (await videoStopped(record.id)) return
+    await db.update(schema.sysTask).set({ localPath, stage: 'saving', updatedAt: now() }).where(and(eq(schema.sysTask.id, record.id), eq(schema.sysTask.status, 'processing')))
     await extractVideoPoster(localPath)
     // 完成状态与业务回写原子提交；恢复旧任务不能覆盖用户后来生成的视频。
     db.transaction(tx => {
+      const current = tx.select({ errorCode: schema.sysTask.errorCode }).from(schema.sysTask).where(eq(schema.sysTask.id, record.id)).get()
+      if (current?.errorCode === 'user_cancelled') return
       const newer = record.storyboardId ? tx.select({ id: schema.sysTask.id }).from(schema.sysTask)
         .where(and(eq(schema.sysTask.storyboardId, record.storyboardId), eq(schema.sysTask.type, 'video'), gt(schema.sysTask.id, record.id))).get() : null
       if (record.storyboardId && !newer) tx.update(schema.storyboards)
@@ -581,6 +709,7 @@ async function recoveryConfig(record: SysTaskRecord): Promise<AIConfig> {
 export async function recoverVideoTask(id: number): Promise<void> {
   const [record] = await db.select().from(schema.sysTask).where(eq(schema.sysTask.id, id))
   if (!record || record.type !== 'video') throw new Error('视频任务不存在')
+  if (record.errorCode === 'user_cancelled') throw new Error('任务已手动停止，请重新生成')
   if (activeTasks.has(id) || record.status === 'completed') return
   if (!record.resultUrl && !record.taskId) throw new Error('未保存上游任务编号，请先核对上游记录，勿重复生成')
   if (record.errorCode === 'generation_failed') throw new Error('上游已确认生成失败，无法恢复原任务')
@@ -588,13 +717,15 @@ export async function recoverVideoTask(id: number): Promise<void> {
   activeTasks.add(id)
   try {
     const config = record.taskId && !record.resultUrl ? await recoveryConfig(record) : null
-    await db.update(schema.sysTask).set({ status: 'processing', errorMsg: null, errorCode: null,
-      stage: record.resultUrl ? 'downloading' : record.stage === 'transferring' || record.errorCode === 'delivery_failed' ? 'transferring' : 'polling', updatedAt: now() }).where(eq(schema.sysTask.id, id))
+    const resumed = await db.update(schema.sysTask).set({ status: 'processing', errorMsg: null, errorCode: null,
+      stage: record.resultUrl ? 'downloading' : record.stage === 'transferring' || record.errorCode === 'delivery_failed' ? 'transferring' : 'polling', updatedAt: now() })
+      .where(and(eq(schema.sysTask.id, id), sql`coalesce(${schema.sysTask.errorCode}, '') != 'user_cancelled'`)).returning({ id: schema.sysTask.id })
+    if (!resumed.length) { activeTasks.delete(id); return }
     void (async () => {
       if (record.resultUrl) {
         await handleVideoComplete(record, record.resultUrl, parseTaskParams(record.params).resultDuration)
         const [fresh] = await db.select().from(schema.sysTask).where(eq(schema.sysTask.id, id))
-        if (fresh?.status !== 'failed' || !record.taskId) return
+        if (fresh?.status !== 'failed' || fresh.errorCode === 'user_cancelled' || !record.taskId) return
         // 签名链接可能过期：重新查询原任务拿新地址。
       }
       const originalConfig = config ?? await recoveryConfig(record)

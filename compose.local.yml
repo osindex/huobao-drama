@@ -9,6 +9,14 @@ services:
         HTTPS_PROXY: http://127.0.0.1:7890
         NO_PROXY: localhost,127.0.0.1,192.168.110.201,192.168.110.202,registry.npmmirror.com,.npmmirror.com,mirrors.aliyun.com
     image: huobao-local-comfy:76bf150
+    environment:
+      AUTH_PASSWORD: ${AUTH_PASSWORD:?Set AUTH_PASSWORD in deployment .env}
+      AUTH_PASSWORD_SALT: ${AUTH_PASSWORD_SALT:-huobao-local-auth}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://vvv.ggjoe.dpdns.org}
+      MEDIA_HTTPS_PROXY: ${MEDIA_HTTPS_PROXY:-http://192.168.110.148:7890}
+      MEDIA_PROXY_HOSTS: ${MEDIA_PROXY_HOSTS:-imgen.x.ai,vidgen.x.ai}
+      MEDIA_DOWNLOAD_TIMEOUT_MS: ${MEDIA_DOWNLOAD_TIMEOUT_MS:-600000}
     ports:
       - "192.168.110.148:5679:5679"
     volumes:
