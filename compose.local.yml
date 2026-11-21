@@ -4,10 +4,11 @@ services:
       context: .
       network: host
       args:
+        NPM_REGISTRY: https://registry.npmjs.org
         HUOBAO_VERSION: local-comfy-76bf150
         HTTP_PROXY: http://127.0.0.1:7890
         HTTPS_PROXY: http://127.0.0.1:7890
-        NO_PROXY: localhost,127.0.0.1,192.168.110.201,192.168.110.202,registry.npmmirror.com,.npmmirror.com,mirrors.aliyun.com
+        NO_PROXY: localhost,127.0.0.1,192.168.110.201,192.168.110.202,registry.npmjs.org,registry.npmmirror.com,.npmmirror.com,mirrors.aliyun.com
     image: huobao-local-comfy:76bf150
     environment:
       AUTH_PASSWORD: ${AUTH_PASSWORD:?Set AUTH_PASSWORD in deployment .env}
