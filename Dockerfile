@@ -59,7 +59,7 @@ COPY --from=backend-build /build/backend/tsconfig.json ./backend/tsconfig.json
 COPY backend/workspace ./workspace-template
 COPY --from=frontend-build /build/frontend/.output/public ./frontend-dist
 COPY docker/entrypoint.sh ./entrypoint.sh
-RUN chmod +x ./entrypoint.sh && mkdir -p /app/data
+RUN sed -i 's/\r$//' ./entrypoint.sh && chmod +x ./entrypoint.sh && mkdir -p /app/data
 
 # 数据卷：SQLite + 生成的静态文件 + 可编辑 workspace
 VOLUME ["/app/data"]
