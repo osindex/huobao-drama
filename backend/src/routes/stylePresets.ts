@@ -3,6 +3,7 @@ import { eq, and } from 'drizzle-orm'
 import { db, getInsertId, schema } from '../db/index.js'
 import { success, created, badRequest, notFound, now } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
+import { requireSuperAdmin } from '../services/team-access.js'
 
 const app = new Hono()
 
@@ -18,7 +19,7 @@ app.get('/', async (c) => {
 })
 
 // POST /style-presets — 新增风格预设
-app.post('/', async (c) => {
+app.post('/', requireSuperAdmin, async (c) => {
   const body = await c.req.json()
   if (!body.name?.trim()) return badRequest(c, '风格名称必填')
   if (!body.value?.trim()) return badRequest(c, '风格 key 必填')
@@ -47,7 +48,7 @@ app.post('/', async (c) => {
 })
 
 // PUT /style-presets/:id — 更新（value 创建后不可修改）
-app.put('/:id', async (c) => {
+app.put('/:id', requireSuperAdmin, async (c) => {
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
   const [row] = await db.select().from(schema.stylePresets)
@@ -71,7 +72,7 @@ app.put('/:id', async (c) => {
 })
 
 // DELETE /style-presets/:id — 硬删除（已使用此风格的项目保留 key，无害）
-app.delete('/:id', async (c) => {
+app.delete('/:id', requireSuperAdmin, async (c) => {
   const id = Number(c.req.param('id'))
   await db.delete(schema.stylePresets).where(eq(schema.stylePresets.id, id))
   return success(c)

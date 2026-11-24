@@ -7,6 +7,7 @@ import { v4 as uuid } from 'uuid'
 import { db, getInsertId, schema } from '../db/index.js'
 import { eq } from 'drizzle-orm'
 import { now } from '../utils/response.js'
+import { getRequestActor } from './auth.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 import { extractVideoPoster } from '../utils/video-poster.js'
 import { ffmpeg, checkFfmpegSuite } from '../utils/ffmpeg.js'
@@ -61,9 +62,12 @@ export async function mergeEpisodeVideos(episodeId: number, dramaId: number, sto
 
   // 创建 merge 记录
   const ts = now()
+  const actor = getRequestActor()
   const res = await db.insert(schema.videoMerges).values({
     episodeId,
     dramaId,
+    teamId: actor?.team.id ?? null,
+    createdBy: actor?.user.id ?? null,
     title: `Episode ${episodeId} Merge`,
     provider: 'ffmpeg',
     model: 'ffmpeg-concat-h264-aac',

@@ -25,6 +25,9 @@ import settings from './routes/settings.js'
 import storage from './routes/storage.js'
 import serverUpdate from './routes/serverUpdate.js'
 import auth from './routes/auth.js'
+import teams from './routes/teams.js'
+import billing from './routes/billing.js'
+import admin from './routes/admin.js'
 import { requestLogger, errorHandler } from './middleware/logger.js'
 import { authEnabled, requireAuth, requirePageAuth } from './services/auth.js'
 import { resumeInterruptedTasks } from './services/generation.js'
@@ -72,6 +75,9 @@ api.route('/storage', storage)
 api.route('/settings', settings)
 api.route('/server-update', serverUpdate)
 api.route('/auth', auth)
+api.route('/teams', teams)
+api.route('/billing', billing)
+api.route('/admin', admin)
 
 app.route('/api/v1', api)
 

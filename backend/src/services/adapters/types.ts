@@ -78,6 +78,7 @@ export interface ProviderRequest {
 
 export interface AIConfig {
   id?: number
+  teamId?: number | null
   provider: string
   baseUrl: string
   apiKey: string

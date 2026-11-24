@@ -7,6 +7,17 @@ import { success, created, badRequest } from '../utils/response.js'
 import { generateImage, generateVideo, recoverVideoTask, recoverImageTask, stopVideoTask } from '../services/generation.js'
 import { safeTaskError } from '../services/video-download.js'
 import { getActiveConfig, getConfigById } from '../services/ai.js'
+import { getRequestActor } from '../services/auth.js'
+import {
+  canWriteInTeam,
+  checkCharacterIdAccess,
+  checkDramaIdAccess,
+  checkPropIdAccess,
+  checkSceneIdAccess,
+  checkStoryboardIdAccess,
+  checkTaskRecordAccess,
+  respondAccessDenied,
+} from '../services/team-access.js'
 import { getDramaStylePrompt } from '../services/style-preset.js'
 import { resolveStoryboardVoiceReferences } from '../services/character-voice-references.js'
 import { logTaskError, logTaskPayload, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
@@ -15,8 +26,12 @@ const app = new Hono()
 
 app.post('/:id/stop', async c => {
   try {
-    await stopVideoTask(Number(c.req.param('id')))
-    return success(c, { id: Number(c.req.param('id')) })
+    const id = Number(c.req.param('id'))
+    const [task] = await db.select().from(schema.sysTask).where(eq(schema.sysTask.id, id))
+    const access = checkTaskRecordAccess(task, 'write')
+    if (!access.ok) return respondAccessDenied(c, access)
+    await stopVideoTask(id)
+    return success(c, { id })
   } catch (error) { return badRequest(c, safeTaskError(error)) }
 })
 
@@ -24,18 +39,21 @@ app.post('/:id/recover', async c => {
   try {
     const id = Number(c.req.param('id'))
     const [task] = await db.select().from(schema.sysTask).where(eq(schema.sysTask.id, id))
+    const access = checkTaskRecordAccess(task, 'write')
+    if (!access.ok) return respondAccessDenied(c, access)
     if (task?.type === 'image') await recoverImageTask(id)
     else await recoverVideoTask(id)
-    return success(c, { id: Number(c.req.param('id')) })
+    return success(c, { id })
   } catch (error) { return badRequest(c, safeTaskError(error)) }
 })
 
 app.get('/:id/diagnostics', async c => {
   const [task] = await db.select().from(schema.sysTask).where(eq(schema.sysTask.id, Number(c.req.param('id'))))
-  if (!task) return badRequest(c, '任务不存在')
-  return success(c, { id: task.id, upstreamTaskId: task.taskId, provider: task.provider, model: task.model,
-    status: task.status, stage: task.stage, errorCode: task.errorCode, error: safeTaskError(task.errorMsg),
-    hasResult: !!task.resultUrl, hasLocalFile: !!task.localPath, createdAt: task.createdAt, updatedAt: task.updatedAt,
+  const access = checkTaskRecordAccess(task, 'read')
+  if (!access.ok) return respondAccessDenied(c, access)
+  return success(c, { id: task!.id, upstreamTaskId: task!.taskId, provider: task!.provider, model: task!.model,
+    status: task!.status, stage: task!.stage, errorCode: task!.errorCode, error: safeTaskError(task!.errorMsg),
+    hasResult: !!task!.resultUrl, hasLocalFile: !!task!.localPath, createdAt: task!.createdAt, updatedAt: task!.updatedAt,
     version: process.env.HUOBAO_VERSION || 'development' })
 })
 
@@ -165,9 +183,34 @@ function validateVideoRequest(body: any, provider?: string): string | null {
 
 // POST /tasks — 发起生成任务（body.type: image | video）
 app.post('/', async (c) => {
+  if (!canWriteInTeam()) {
+    return c.json({ code: 403, message: '当前团队角色为只读访客，无权提交生成任务' }, 403)
+  }
+
   const body = await c.req.json()
   const type = body.type as TaskType
   if (type !== 'image' && type !== 'video') return badRequest(c, 'type 必须为 image 或 video')
+
+  if (body.storyboard_id) {
+    const sbAccess = checkStoryboardIdAccess(Number(body.storyboard_id), 'write')
+    if (!sbAccess.ok) return respondAccessDenied(c, sbAccess)
+    if (sbAccess.drama) body.drama_id = sbAccess.drama.id
+  } else if (body.character_id) {
+    const chAccess = checkCharacterIdAccess(Number(body.character_id), 'write')
+    if (!chAccess.ok) return respondAccessDenied(c, chAccess)
+    body.drama_id = chAccess.character!.dramaId
+  } else if (body.scene_id) {
+    const scAccess = checkSceneIdAccess(Number(body.scene_id), 'write')
+    if (!scAccess.ok) return respondAccessDenied(c, scAccess)
+    body.drama_id = scAccess.scene!.dramaId
+  } else if (body.prop_id) {
+    const prAccess = checkPropIdAccess(Number(body.prop_id), 'write')
+    if (!prAccess.ok) return respondAccessDenied(c, prAccess)
+    body.drama_id = prAccess.prop!.dramaId
+  } else if (body.drama_id) {
+    const drAccess = checkDramaIdAccess(Number(body.drama_id), 'write')
+    if (!drAccess.ok) return respondAccessDenied(c, drAccess)
+  }
 
   if (type === 'image') {
     if (!body.prompt) return badRequest(c, '提示词必填')
@@ -242,6 +285,7 @@ app.post('/', async (c) => {
         dramaId: body.drama_id,
         sceneId: body.scene_id,
         characterId: body.character_id,
+        propId: body.prop_id,
         prompt: body.prompt,
         model: body.model,
         size: body.size,
@@ -289,7 +333,10 @@ app.get('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const [row] = await db.select().from(schema.sysTask)
     .where(eq(schema.sysTask.id, id))
-  return success(c, row || null)
+  if (!row) return success(c, null)
+  const access = checkTaskRecordAccess(row, 'read')
+  if (!access.ok) return respondAccessDenied(c, access)
+  return success(c, row)
 })
 
 // GET /tasks — 按 type / storyboard_id / drama_id 过滤
@@ -297,12 +344,25 @@ app.get('/', async (c) => {
   const type = c.req.query('type')
   const storyboardId = c.req.query('storyboard_id')
   const dramaId = c.req.query('drama_id')
+  const actor = getRequestActor()
+
+  if (dramaId) {
+    const access = checkDramaIdAccess(Number(dramaId), 'read')
+    if (!access.ok) return respondAccessDenied(c, access)
+  }
+  if (storyboardId) {
+    const access = checkStoryboardIdAccess(Number(storyboardId), 'read')
+    if (!access.ok) return respondAccessDenied(c, access)
+  }
 
   let rows = await db.select().from(schema.sysTask)
 
   if (type) rows = rows.filter(r => r.type === type)
   if (storyboardId) rows = rows.filter(r => r.storyboardId === Number(storyboardId))
   if (dramaId) rows = rows.filter(r => r.dramaId === Number(dramaId))
+  if (actor) {
+    rows = rows.filter(r => checkTaskRecordAccess(r, 'read', actor).ok)
+  }
 
   return success(c, rows)
 })
@@ -311,6 +371,8 @@ app.get('/', async (c) => {
 app.delete('/:id', async (c) => {
   const id = Number(c.req.param('id'))
   const [task] = await db.select().from(schema.sysTask).where(eq(schema.sysTask.id, id))
+  const access = checkTaskRecordAccess(task, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
   if (task?.status === 'processing') return badRequest(c, '任务运行中，暂不能删除')
   await db.delete(schema.sysTask).where(eq(schema.sysTask.id, id))
   return success(c)

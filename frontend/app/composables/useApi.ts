@@ -1,11 +1,25 @@
 const BASE = '/api/v1'
 
+let activeTeamHeaderId: number | null = null
+export function setActiveTeamHeader(teamId: number | null | undefined) {
+  activeTeamHeaderId = teamId && Number.isSafeInteger(Number(teamId)) ? Number(teamId) : null
+}
+
+let onCreditChangeHook: (() => void) | null = null
+export function setOnCreditChangeHook(fn: (() => void) | null) {
+  onCreditChangeHook = fn
+}
+
+const CREDIT_AFFECTING_RE = /^\/(tasks(\/\d+\/(stop|recover))?$|agent\/|billing\/redeem|characters\/(\d+\/generate-|batch-generate-images)|scenes\/\d+\/generate-|props\/\d+\/generate-|episodes\/\d+\/(extract|generate-video-prompts))/
+
 function redirectToLogin() {
   if (location.pathname !== '/login') location.assign('/login')
 }
 
 async function req<T = any>(method: string, path: string, body?: any): Promise<T> {
-  const opts: RequestInit = { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' } }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (activeTeamHeaderId && path !== '/auth/status') headers['X-Team-Id'] = String(activeTeamHeaderId)
+  const opts: RequestInit = { method, credentials: 'same-origin', headers }
   if (body) opts.body = JSON.stringify(body)
 
   const start = performance.now()
@@ -23,6 +37,9 @@ async function req<T = any>(method: string, path: string, body?: any): Promise<T
     }
 
     console.log(`%c[API] %c${method} ${path} %c${resp.status} %c${ms}ms`, 'color:#888', 'color:#66bb6a', 'color:#66bb6a;font-weight:bold', 'color:#888')
+    if (method === 'POST' && CREDIT_AFFECTING_RE.test(path)) {
+      onCreditChangeHook?.()
+    }
     return json.data ?? json
   } catch (err: any) {
     if (!err.message?.match(/^\d{3}$/)) {
@@ -34,8 +51,37 @@ async function req<T = any>(method: string, path: string, body?: any): Promise<T
 }
 
 export const authAPI = {
-  status: () => api.get<{ enabled: boolean }>('/auth/status'),
+  status: () => api.get<{
+    enabled: boolean
+    authenticated?: boolean
+    allow_open_register?: boolean
+    allow_invite_register?: boolean
+    register_bonus_credits?: number
+    billing_enabled?: boolean
+    user?: {
+      id: number
+      username: string
+      display_name: string
+      is_super_admin: boolean
+      current_team_id: number
+    }
+    current_team?: {
+      id: number
+      name: string
+      description?: string | null
+      role: 'owner' | 'admin' | 'member' | 'viewer'
+      project_visibility: 'team_shared' | 'creator_only'
+      credit_balance: number
+      frozen_credits: number
+      credit_limit: number | null
+      credit_used: number
+    }
+    teams?: any[]
+  }>('/auth/status'),
   logout: () => api.post('/auth/logout'),
+  updateProfile: (display_name: string) => api.put('/auth/profile', { display_name }),
+  changePassword: (old_password: string, new_password: string) => api.put('/auth/password', { old_password, new_password }),
+  inviteInfo: (code: string) => api.get(`/auth/invite-info?code=${encodeURIComponent(code)}`),
 }
 
 export const api = {
@@ -51,6 +97,9 @@ export const dramaAPI = {
   create: (data: any) => api.post('/dramas', data),
   update: (id: number, data: any) => api.put(`/dramas/${id}`, data),
   del: (id: number) => api.del(`/dramas/${id}`),
+  listShares: (id: number) => api.get<any[]>(`/dramas/${id}/shares`),
+  addShare: (id: number, user_id: number, permission: 'view' | 'edit' = 'edit') => api.post(`/dramas/${id}/shares`, { user_id, permission }),
+  removeShare: (id: number, userId: number) => api.del(`/dramas/${id}/shares/${userId}`),
 }
 
 export const episodeAPI = {
@@ -128,8 +177,10 @@ export const taskAPI = {
 async function uploadReq<T = any>(path: string, file: File): Promise<T> {
   const fd = new FormData()
   fd.append('file', file)
+  const headers: Record<string, string> = {}
+  if (activeTeamHeaderId) headers['X-Team-Id'] = String(activeTeamHeaderId)
   console.log(`%c[API] %cPOST %c${path} %c${file.name}`, 'color:#888', 'color:#4fc3f7;font-weight:bold', 'color:#ccc', 'color:#888')
-  const resp = await fetch(`${BASE}${path}`, { method: 'POST', body: fd, credentials: 'same-origin' })
+  const resp = await fetch(`${BASE}${path}`, { method: 'POST', body: fd, headers, credentials: 'same-origin' })
   if (resp.status === 401) redirectToLogin()
   const json = await resp.json()
   if (!resp.ok || (json.code && json.code >= 400)) {
@@ -196,4 +247,59 @@ export const serverUpdateAPI = {
   state: () => api.get('/server-update/state'),
   check: () => api.post('/server-update/check'),
   apply: () => api.post('/server-update/apply'),
+}
+
+export const teamAPI = {
+  list: () => api.get<any[]>('/teams'),
+  create: (d: { name: string; description?: string; project_visibility?: 'team_shared' | 'creator_only' }) => api.post('/teams', d),
+  switch: (team_id: number) => api.post('/teams/switch', { team_id }),
+  join: (code: string) => api.post('/teams/join', { code }),
+  current: () => api.get<any>('/teams/current'),
+  updateCurrent: (d: { name?: string; description?: string; project_visibility?: 'team_shared' | 'creator_only' }) => api.put('/teams/current', d),
+  addMember: (d: { username: string; role: string; credit_limit?: number | null }) => api.post('/teams/current/members', d),
+  updateMember: (userId: number, d: { role?: string; credit_limit?: number | null; reset_used?: boolean }) => api.put(`/teams/current/members/${userId}`, d),
+  removeMember: (userId: number) => api.del(`/teams/current/members/${userId}`),
+  createInvitation: (d: { role?: string; max_uses?: number; expires_days?: number | null; credit_limit?: number | null }) => api.post('/teams/current/invitations', d),
+  revokeInvitation: (id: number) => api.del(`/teams/current/invitations/${id}`),
+  generateApiKey: () => api.post<{ api_key: string; api_key_prefix: string }>('/teams/current/api-key'),
+  revokeApiKey: () => api.del('/teams/current/api-key'),
+}
+
+export const billingAPI = {
+  wallet: () => api.get<any>('/billing/wallet'),
+  pricing: () => api.get<any[]>('/billing/pricing'),
+  estimate: (params: Record<string, string | number>) => {
+    const q = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') q.set(k, String(v))
+    return api.get<{ credits: number }>(`/billing/estimate?${q.toString()}`)
+  },
+  packages: () => api.get<any[]>('/billing/packages'),
+  redeem: (code: string) => api.post<any>('/billing/redeem', { code }),
+  createOrder: (package_id: number, payment_channel = 'online_pending') => api.post<any>('/billing/orders', { package_id, payment_channel }),
+  orders: (limit = 30) => api.get<any[]>(`/billing/orders?limit=${limit}`),
+  ledger: (page = 1, pageSize = 30, type = '') => api.get<any>(`/billing/ledger?page=${page}&page_size=${pageSize}${type ? `&type=${encodeURIComponent(type)}` : ''}`),
+}
+
+export const adminAPI = {
+  overview: () => api.get<any>('/admin/overview'),
+  getPolicy: () => api.get<any>('/admin/policy'),
+  updatePolicy: (d: any) => api.put('/admin/policy', d),
+  users: () => api.get<any[]>('/admin/users'),
+  createUser: (d: any) => api.post('/admin/users', d),
+  updateUser: (id: number, d: any) => api.put(`/admin/users/${id}`, d),
+  teams: () => api.get<any[]>('/admin/teams'),
+  adjustTeamCredits: (teamId: number, delta_credits: number, note?: string) => api.post(`/admin/teams/${teamId}/credits`, { delta_credits, note }),
+  redeemCodes: (status = '') => api.get<any[]>(`/admin/redeem-codes${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  generateRedeemCodes: (d: { count: number; credits: number; batch_note?: string; expires_days?: number | null }) => api.post('/admin/redeem-codes', d),
+  revokeRedeemCode: (id: number) => api.del(`/admin/redeem-codes/${id}`),
+  pricing: () => api.get<any[]>('/admin/pricing'),
+  createPricing: (d: any) => api.post('/admin/pricing', d),
+  updatePricing: (id: number, d: any) => api.put(`/admin/pricing/${id}`, d),
+  deletePricing: (id: number) => api.del(`/admin/pricing/${id}`),
+  packages: () => api.get<any[]>('/admin/packages'),
+  createPackage: (d: any) => api.post('/admin/packages', d),
+  updatePackage: (id: number, d: any) => api.put(`/admin/packages/${id}`, d),
+  deletePackage: (id: number) => api.del(`/admin/packages/${id}`),
+  orders: () => api.get<any[]>('/admin/orders'),
+  completeOrder: (orderNo: string, external_trade_no?: string) => api.post(`/admin/orders/${encodeURIComponent(orderNo)}/complete`, { external_trade_no }),
 }

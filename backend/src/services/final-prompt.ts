@@ -10,6 +10,7 @@ import { eq } from 'drizzle-orm'
 import { db, schema } from '../db/index.js'
 import { mastra } from '../mastra/index.js'
 import { buildAgentRequestContext } from '../agents/context.js'
+import { chargeTextAgentCall } from './billing.js'
 import { logTaskError, logTaskProgress } from '../utils/task-logger.js'
 
 type CharacterRow = typeof schema.characters.$inferSelect
@@ -20,6 +21,11 @@ type PropRow = typeof schema.props.$inferSelect
 export interface PromptAgentOptions { model?: string; configId?: number }
 
 async function runPromptAgent(episodeId: number, dramaId: number, message: string, opts?: PromptAgentOptions) {
+  await chargeTextAgentCall({
+    model: opts?.model,
+    configId: opts?.configId,
+    description: '资产提示词生成',
+  })
   const agent = mastra.getAgent('prompt_generator')
   if (!agent) throw new Error('图片提示词 Agent 不可用')
   const requestContext = buildAgentRequestContext({

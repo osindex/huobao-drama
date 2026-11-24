@@ -5,7 +5,12 @@ import os from 'node:os'
 import path from 'node:path'
 import { Hono } from 'hono'
 import { serveStatic } from '@hono/node-server/serve-static'
-import { requirePageAuth } from '../src/services/auth.js'
+
+const dbRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'huobao-static-auth-db-'))
+process.env.SQLITE_PATH = path.join(dbRoot, 'static-auth.sqlite3')
+process.env.MYSQL_AUTO_IMPORT = 'false'
+const { sqlite } = await import('../src/db/index.js')
+const { requirePageAuth } = await import('../src/services/auth.js')
 
 test('public files stay accessible while missing and encoded paths cannot expose private files', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'huobao-static-auth-'))
@@ -30,4 +35,9 @@ test('public files stay accessible while missing and encoded paths cannot expose
     delete process.env.AUTH_PASSWORD
     await fs.rm(root, { recursive: true, force: true })
   }
+})
+
+test.after(async () => {
+  sqlite.close()
+  await fs.rm(dbRoot, { recursive: true, force: true })
 })

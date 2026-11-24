@@ -15,7 +15,7 @@
         <button class="btn btn-icon tour-help-btn" :title="t('tour.helpTitle')" @click="startTour('index', INDEX_TOUR, t)">
           <CircleHelp :size="15" :stroke-width="1.8" />
         </button>
-        <button class="btn btn-primary" @click="showCreate = true">
+        <button v-if="canWrite" class="btn btn-primary" @click="showCreate = true">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
           </svg>
@@ -112,7 +112,8 @@
                 </button>
               </template>
               <AppMenuItem @click="activeMenuId = null; openDrama(d)">{{ t('index.openProject') }}</AppMenuItem>
-              <AppMenuItem danger @click="activeMenuId = null; dramaToDelete = d">{{ t('index.deleteProject') }}</AppMenuItem>
+              <AppMenuItem v-if="authState.enabled && canManageDrama(d)" @click="activeMenuId = null; openShareDialog(d)">权限与成员共享</AppMenuItem>
+              <AppMenuItem v-if="!authState.enabled || canManageDrama(d)" danger @click="activeMenuId = null; dramaToDelete = d">{{ t('index.deleteProject') }}</AppMenuItem>
             </AppMenu>
           </div>
         </div>
@@ -120,11 +121,15 @@
           <h2 class="project-name truncate">{{ d.title }}</h2>
           <div class="project-meta">
             <span v-if="d.style" class="tag tag-accent">{{ styleLabel(d.style) }}</span>
+            <span v-if="authState.enabled" class="tag" :title="d.effective_visibility === 'creator_only' ? '仅创建者及被授权成员可见' : '当前团队成员共享'">
+              {{ d.effective_visibility === 'creator_only' ? '🔒 私有' : '👥 共享' }}
+            </span>
             <span class="dim">{{ t('index.projectMeta', { chars: d.characters?.length || 0, scenes: d.scenes?.length || 0, eps: d.episodes?.length || 0 }) }}</span>
           </div>
           <div class="project-foot dim">
             <Clock :size="11" :stroke-width="1.8" />
-            {{ fmtDate(d.updated_at || d.updatedAt) }}
+            <span>{{ fmtDate(d.updated_at || d.updatedAt) }}</span>
+            <span v-if="authState.enabled && d.creator_name" class="creator-label truncate">· {{ d.creator_name }}</span>
           </div>
         </div>
       </article>
@@ -173,6 +178,11 @@
               <BaseSelect v-model="form.aspect_ratio" :options="aspectRatioOptions" :placeholder="t('index.createDialog.aspectRatioPlaceholder')" />
               <span class="field-hint">{{ t('index.createDialog.aspectRatioHint') }}</span>
             </label>
+            <label v-if="authState.enabled" class="field">
+              <span class="field-label">项目可见范围</span>
+              <BaseSelect v-model="form.visibility" :options="visibilityOptions" :searchable="false" />
+              <span class="field-hint">可跟随团队默认规则，也可单独指定本项目公开共享或仅创建者可见</span>
+            </label>
           </div>
           <div class="dialog-foot">
             <button type="button" class="btn" @click="showCreate = false">{{ t('common.cancel') }}</button>
@@ -184,6 +194,60 @@
             </button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <!-- 项目权限与成员共享弹窗 -->
+    <div v-if="sharingDrama" class="overlay" @click.self="sharingDrama = null">
+      <div class="dialog share-dialog">
+        <div class="dialog-head">
+          <div class="dialog-head-copy">
+            <h2 class="dialog-title">权限与共享 · {{ sharingDrama.title }}</h2>
+            <p class="dialog-desc">配置该项目在当前团队内的可见性，或将私有项目单独授权给指定成员</p>
+          </div>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span class="field-label">项目可见模式</span>
+            <BaseSelect
+              :model-value="sharingDrama.visibility || 'inherit'"
+              :options="visibilityOptions"
+              :searchable="false"
+              @update:model-value="saveDramaVisibility"
+            />
+            <span class="field-hint">
+              当前生效状态：{{ sharingDrama.effective_visibility === 'creator_only' ? '🔒 仅创建者、团队管理员与下方受邀成员可见' : '👥 当前团队全体成员可见（非访客均可协作）' }}
+            </span>
+          </label>
+
+          <div class="share-section">
+            <div class="field-label">定向授权给同团队成员</div>
+            <div class="share-add-row">
+              <BaseSelect v-model="shareTargetUserId" :options="shareCandidateOptions" placeholder="选择团队成员..." searchable />
+              <BaseSelect v-model="sharePermission" :options="sharePermOptions" :searchable="false" />
+              <button type="button" class="btn btn-primary btn-sm" :disabled="!shareTargetUserId || shareSaving" @click="addDramaShare">
+                授权
+              </button>
+            </div>
+
+            <div v-if="dramaShares.length" class="share-list">
+              <div v-for="s in dramaShares" :key="s.user_id" class="share-item">
+                <div class="share-item-info">
+                  <span class="share-item-name">{{ s.display_name || s.username }}</span>
+                  <span class="dim mono">@{{ s.username }}</span>
+                </div>
+                <span class="tag" :class="s.permission === 'edit' ? 'tag-accent' : ''">
+                  {{ s.permission === 'edit' ? '可编辑' : '仅查看' }}
+                </span>
+                <button type="button" class="btn btn-ghost btn-sm" @click="removeDramaShare(s.user_id)">移除</button>
+              </div>
+            </div>
+            <p v-else class="field-hint" style="margin-top:6px">暂无单独授权成员。当项目处于「私有」模式时，可通过上方选择器添加协作者。</p>
+          </div>
+        </div>
+        <div class="dialog-foot">
+          <button type="button" class="btn btn-primary" @click="sharingDrama = null">完成</button>
+        </div>
       </div>
     </div>
     <ConfirmDialog
@@ -202,11 +266,13 @@ import { toast } from 'vue-sonner'
 import { toastError } from '~/composables/useToast'
 import { useI18n } from 'vue-i18n'
 import { Clock, CircleHelp } from 'lucide-vue-next'
-import { dramaAPI, stylePresetAPI } from '~/composables/useApi'
+import { dramaAPI, stylePresetAPI, teamAPI } from '~/composables/useApi'
+import { useAuthState } from '~/composables/useAuthState'
 import BaseSelect from '~/components/BaseSelect.vue'
 import { startTour, autoTour } from '~/composables/useTour'
 
 const { t, locale } = useI18n()
+const { authState, isSuperAdmin, isTeamAdmin, canWrite } = useAuthState()
 
 const dramas = ref([])
 const loading = ref(false)
@@ -221,7 +287,95 @@ const sortOptions = computed(() => ([
 const activeMenuId = ref(null)
 const dramaToDelete = ref(null)
 const deletingDrama = ref(false)
-const form = ref({ title: '', style: '', aspect_ratio: '16:9' })
+const form = ref({ title: '', style: '', aspect_ratio: '16:9', visibility: 'inherit' })
+const visibilityOptions = computed(() => {
+  const defLabel = authState.currentTeam?.project_visibility === 'creator_only' ? '仅创建者可见' : '团队全员共享'
+  return [
+    { label: `跟随团队默认（${defLabel}）`, value: 'inherit' },
+    { label: '👥 团队全员共享', value: 'team_shared' },
+    { label: '🔒 私有（仅自己与受邀成员可见）', value: 'creator_only' },
+  ]
+})
+
+// 项目共享弹窗状态
+const sharingDrama = ref(null)
+const dramaShares = ref([])
+const teamMembersForShare = ref([])
+const shareTargetUserId = ref('')
+const sharePermission = ref('edit')
+const shareSaving = ref(false)
+const sharePermOptions = [
+  { label: '可编辑', value: 'edit' },
+  { label: '仅查看', value: 'view' },
+]
+const shareCandidateOptions = computed(() => {
+  const ownerCreatorId = sharingDrama.value?.created_by
+  return teamMembersForShare.value
+    .filter(m => m.user_id !== ownerCreatorId)
+    .map(m => ({ label: `${m.display_name || m.username} (@${m.username})`, value: String(m.user_id) }))
+})
+
+function canManageDrama(d) {
+  if (!authState.enabled) return true
+  if (isSuperAdmin.value || isTeamAdmin.value) return true
+  return d?.created_by != null && d.created_by === authState.user?.id
+}
+
+async function openShareDialog(d) {
+  sharingDrama.value = d
+  shareTargetUserId.value = ''
+  sharePermission.value = 'edit'
+  try {
+    const [shares, curTeam] = await Promise.all([
+      dramaAPI.listShares(d.id),
+      teamAPI.current(),
+    ])
+    dramaShares.value = shares || []
+    teamMembersForShare.value = curTeam?.members || []
+  } catch (e) {
+    toastError(e)
+  }
+}
+
+async function saveDramaVisibility(vis) {
+  if (!sharingDrama.value) return
+  try {
+    await dramaAPI.update(sharingDrama.value.id, { visibility: vis })
+    sharingDrama.value.visibility = vis
+    const teamDefault = authState.currentTeam?.project_visibility || 'team_shared'
+    sharingDrama.value.effective_visibility = vis === 'inherit' ? teamDefault : vis
+    toast.success('项目可见性已更新')
+    load()
+  } catch (e) {
+    toastError(e)
+  }
+}
+
+async function addDramaShare() {
+  if (!sharingDrama.value || !shareTargetUserId.value) return
+  shareSaving.value = true
+  try {
+    await dramaAPI.addShare(sharingDrama.value.id, Number(shareTargetUserId.value), sharePermission.value)
+    dramaShares.value = await dramaAPI.listShares(sharingDrama.value.id)
+    shareTargetUserId.value = ''
+    toast.success('成员权限已保存')
+  } catch (e) {
+    toastError(e)
+  } finally {
+    shareSaving.value = false
+  }
+}
+
+async function removeDramaShare(userId) {
+  if (!sharingDrama.value) return
+  try {
+    await dramaAPI.removeShare(sharingDrama.value.id, userId)
+    dramaShares.value = await dramaAPI.listShares(sharingDrama.value.id)
+    toast.success('已取消该成员共享')
+  } catch (e) {
+    toastError(e)
+  }
+}
 const stylePresets = ref([])
 const styleSelectOptions = computed(() => stylePresets.value.map(p => ({ label: p.name, value: p.value })))
 const selectedStyleDesc = computed(() => stylePresets.value.find(p => p.value === form.value.style)?.description || '')
@@ -364,6 +518,7 @@ function fmtDate(s) {
 }
 
 onMounted(load)
+watch(() => authState.teamSwitchSeq, () => { load() })
 
 // ===== 应用内引导（首页）：3 步 — 欢迎 / 新建项目 / AI 配置提醒 =====
 const INDEX_TOUR = [
@@ -615,6 +770,46 @@ onMounted(() => setTimeout(() => autoTour('index', INDEX_TOUR, t), 600))
 .empty-desc { font-size: 12px; color: var(--text-3); max-width: 240px; line-height: 1.6; }
 
 .create-dialog { width: 460px; max-width: calc(100vw - 32px); }
+.share-dialog { width: 520px; max-width: calc(100vw - 32px); }
+.creator-label { max-width: 110px; }
+.share-section {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.share-add-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 115px auto;
+  gap: 8px;
+  align-items: center;
+}
+.share-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.share-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-2);
+}
+.share-item-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.share-item-name { font-weight: 600; color: var(--text-0); }
 .dialog-head-copy { display: flex; flex-direction: column; gap: 2px; }
 .dialog-desc { font-size: 12.5px; color: var(--text-3); }
 .modal-icon {

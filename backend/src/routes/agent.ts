@@ -5,6 +5,8 @@ import { Hono } from 'hono'
 import { validAgentTypes } from '../agents/index.js'
 import { buildAgentRequestContext } from '../agents/context.js'
 import { mastra } from '../mastra/index.js'
+import { chargeTextAgentCall } from '../services/billing.js'
+import { checkEpisodeIdAccess, respondAccessDenied } from '../services/team-access.js'
 import { success, badRequest } from '../utils/response.js'
 import { logTaskError, logTaskPayload, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
@@ -38,17 +40,23 @@ app.post('/:type/chat', async (c) => {
   const body = await c.req.json()
   const { message, drama_id, episode_id } = body
 
+  if (!episode_id || !drama_id) {
+    logTaskError('Agent', agentType, { reason: 'missing drama_id or episode_id' })
+    return badRequest(c, '需要 drama_id 与 episode_id')
+  }
+
+  const epAccess = checkEpisodeIdAccess(Number(episode_id), 'write')
+  if (!epAccess.ok) return respondAccessDenied(c, epAccess)
+  if (epAccess.episode!.dramaId !== Number(drama_id)) {
+    return badRequest(c, '剧集与项目不匹配')
+  }
+
   logTaskStart('Agent', agentType, {
     dramaId: drama_id,
     episodeId: episode_id,
     message,
   })
   logTaskPayload('Agent', `${agentType} input`, body)
-
-  if (!episode_id || !drama_id) {
-    logTaskError('Agent', agentType, { reason: 'missing drama_id or episode_id' })
-    return badRequest(c, '需要 drama_id 与 episode_id')
-  }
 
   const agent = mastra.getAgent(agentType)
   if (!agent) {
@@ -57,8 +65,8 @@ app.post('/:type/chat', async (c) => {
   }
 
   const requestContext = buildAgentRequestContext({
-    episodeId: episode_id,
-    dramaId: drama_id,
+    episodeId: Number(episode_id),
+    dramaId: Number(drama_id),
     modelOverride: body.model || undefined,
     textConfigId: body.config_id || undefined,
   })
@@ -66,6 +74,12 @@ app.post('/:type/chat', async (c) => {
   const startTime = performance.now()
 
   try {
+    await chargeTextAgentCall({
+      model: body.model || undefined,
+      configId: body.config_id || undefined,
+      description: `AI 智能体调用（${agentType}）`,
+    })
+
     // Keep each non-streaming model response small enough for relay timeouts.
     // More steps allow the agent to finish the episode in smaller save batches.
     const agentMessage = agentType === 'storyboard_breaker'

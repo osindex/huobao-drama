@@ -2,9 +2,16 @@
   <div class="settings-page">
     <div class="settings-layout">
       <aside class="settings-nav">
+        <div v-if="authState.enabled" class="nav-group">
+          <div class="nav-group-label">团队与商业化</div>
+          <button v-for="wt in workspaceTabs" :key="wt.id" :class="['nav-item', { active: tab === wt.id }]" @click="selectTab(wt.id)">
+            <component :is="wt.icon" :size="14" />
+            {{ wt.label }}
+          </button>
+        </div>
         <div class="nav-group">
           <div class="nav-group-label">{{ t('settings.groupBase') }}</div>
-          <button v-for="nt in baseTabs" :key="nt.id" :class="['nav-item', { active: tab === nt.id }]" @click="tab = nt.id">
+          <button v-for="nt in baseTabs" :key="nt.id" :class="['nav-item', { active: tab === nt.id }]" @click="selectTab(nt.id)">
             <component :is="nt.icon" :size="14" />
             {{ nt.label }}
           </button>
@@ -12,9 +19,12 @@
       </aside>
 
       <div class="settings-content">
+        <TeamPanel v-if="tab === 'team'" />
+        <WalletPanel v-else-if="tab === 'wallet'" />
+        <AdminPanel v-else-if="tab === 'admin' && isSuperAdmin" />
 
         <!-- ===== 通用（内容语言） ===== -->
-        <div v-if="tab === 'general'" class="settings-scroll">
+        <div v-else-if="tab === 'general'" class="settings-scroll">
           <div class="settings-head">
             <h2 class="settings-title">{{ t('settings.general.title') }}</h2>
             <p class="settings-desc">{{ t('settings.general.desc') }}</p>
@@ -73,12 +83,17 @@
         </div>
 
         <!-- ===== AI 服务配置 ===== -->
-        <div v-if="tab === 'ai'" class="settings-scroll">
+        <div v-else-if="tab === 'ai'" class="settings-scroll">
           <div class="settings-head">
             <h2 class="settings-title">{{ t('settings.ai.title') }}</h2>
-            <p class="settings-desc">{{ t('settings.ai.desc') }}</p>
+            <p class="settings-desc">
+              <template v-if="authState.enabled && !isSuperAdmin">
+                平台已提供开箱即用的托管算力模型（按团队钱包点数结算）。{{ isTeamAdmin ? '作为团队管理员，您也可为当前团队绑定自有云端 API Key（BYOK），使用自有密钥调用免扣平台算力。' : '如需绑定团队自有 API Key，请联系当前团队管理员配置。' }}
+              </template>
+              <template v-else>{{ t('settings.ai.desc') }}</template>
+            </p>
           </div>
-          <section class="card quick-card">
+          <section v-if="canAddAiConfig" class="card quick-card">
             <div class="quick-card-head">
               <div class="setup-title">{{ t('settings.ai.quickTitle') }}</div>
               <span class="tag tag-accent">{{ t('settings.ai.recommended') }}</span>
@@ -125,7 +140,7 @@
               </div>
             </div>
           </section>
-          <section class="card setup-panel">
+          <section v-if="canAddAiConfig" class="card setup-panel">
             <div class="setup-panel-head compact">
               <div>
                 <div class="setup-title">{{ t('settings.ai.manualTitle') }}</div>
@@ -151,7 +166,7 @@
                   <div class="svc-group-sub">{{ serviceMeta[st.type].desc }}</div>
                 </div>
                 <span v-if="countActive(st.type)" class="tag tag-accent">{{ t('settings.ai.activeCount', { n: countActive(st.type) }) }}</span>
-                <button class="btn btn-ghost btn-sm ml-auto" @click="startAddCfg(st.type)"><Plus :size="13" /> {{ t('common.add') }}</button>
+                <button v-if="canAddAiConfig" class="btn btn-ghost btn-sm ml-auto" @click="startAddCfg(st.type)"><Plus :size="13" /> {{ t('common.add') }}</button>
               </div>
               <div v-for="c in byType(st.type)" :key="c.id" class="config-row">
                 <div class="provider-badge" :class="{ 'has-icon': !!providerIconUrl(c.provider) }" :data-provider="c.provider">
@@ -161,6 +176,9 @@
                 <div class="config-main">
                   <div class="config-line">
                     <span class="config-name">{{ c.name || `${c.provider}-${c.service_type}` }}</span>
+                    <span v-if="authState.enabled" :class="['tag', c.is_byok ? 'tag-accent' : '']">
+                      {{ c.is_byok ? '团队自有 Key · 免扣点' : '平台算力' }}
+                    </span>
                     <span :class="['tag', c.api_key ? 'tag-success' : 'tag-error']">{{ c.api_key ? t('settings.ai.hasKey') : t('settings.ai.noKey') }}</span>
                     <span v-if="!c.is_active" class="tag">{{ t('settings.common.disabled') }}</span>
                   </div>
@@ -168,22 +186,25 @@
                     <button
                       v-for="m in c.model" :key="m" type="button"
                       :class="['cfg-model-chip mono', { 'is-default': isDefaultModel(st.type, c, m) }]"
-                      :title="isDefaultModel(st.type, c, m) ? t('settings.ai.currentDefault') : t('settings.ai.setDefault')"
-                      @click="setDefaultModel(st.type, c, m)"
+                      :disabled="c.can_edit === false"
+                      :title="isDefaultModel(st.type, c, m) ? t('settings.ai.currentDefault') : (c.can_edit === false ? '平台默认模型配置' : t('settings.ai.setDefault'))"
+                      @click="c.can_edit !== false && setDefaultModel(st.type, c, m)"
                     >
                       <Star v-if="isDefaultModel(st.type, c, m)" :size="9" class="cfg-model-star" />
                       {{ m }}
                     </button>
                   </div>
-                  <div class="config-sub mono truncate">{{ c.base_url || t('settings.ai.noBaseUrl') }}</div>
+                  <div class="config-sub mono truncate">{{ c.base_url || (c.can_edit === false ? '平台托管推理节点' : t('settings.ai.noBaseUrl')) }}</div>
                 </div>
-                <button v-if="st.type === 'text'" class="btn btn-ghost btn-sm" @click="testExistingCfg(c)">{{ t('settings.ai.test') }}</button>
-                <label class="config-switch">
-                  <input type="checkbox" class="sr-only" :checked="c.is_active" @change="toggleCfg(c)">
-                  <span class="switch" :class="{ on: c.is_active }"></span>
-                </label>
-                <button class="btn btn-ghost btn-icon btn-sm" @click="startEditCfg(c)"><Pencil :size="13" /></button>
-                <button class="btn btn-danger btn-icon btn-sm" @click="delCfg(c.id)"><Trash2 :size="13" /></button>
+                <template v-if="c.can_edit !== false">
+                  <button v-if="st.type === 'text'" class="btn btn-ghost btn-sm" @click="testExistingCfg(c)">{{ t('settings.ai.test') }}</button>
+                  <label class="config-switch">
+                    <input type="checkbox" class="sr-only" :checked="c.is_active" @change="toggleCfg(c)">
+                    <span class="switch" :class="{ on: c.is_active }"></span>
+                  </label>
+                  <button class="btn btn-ghost btn-icon btn-sm" @click="startEditCfg(c)"><Pencil :size="13" /></button>
+                  <button class="btn btn-danger btn-icon btn-sm" @click="delCfg(c.id)"><Trash2 :size="13" /></button>
+                </template>
               </div>
               <p v-if="!byType(st.type).length" class="config-empty">{{ t('settings.common.empty') }}</p>
             </section>
@@ -494,6 +515,24 @@
           <span class="tag tag-accent ml-auto">{{ serviceMeta[cfgForm.service_type].label }}</span>
         </div>
         <div class="dialog-body config-dialog-body">
+          <div v-if="authState.enabled && !cfgEditId && isSuperAdmin && authState.currentTeam" class="field">
+            <span class="field-label">配置归属范围</span>
+            <div class="lang-picker">
+              <button
+                type="button"
+                :class="['lang-option', { on: cfgForm.scope === 'platform' }]"
+                @click="cfgForm.scope = 'platform'"
+              >平台全局模型（按量扣算力）</button>
+              <button
+                type="button"
+                :class="['lang-option', { on: cfgForm.scope === 'team' }]"
+                @click="cfgForm.scope = 'team'; if (cfgForm.provider === 'comfyui') cfgForm.provider = ''"
+              >当前团队自有 Key（免扣算力）</button>
+            </div>
+          </div>
+          <div v-else-if="authState.enabled && !cfgEditId && !isSuperAdmin" class="field">
+            <span class="tag tag-accent" style="width:fit-content">当前团队专属自有 Key（BYOK · 免扣平台算力）</span>
+          </div>
           <div class="preset-picker">
             <button
               v-for="preset in presetsByType(cfgForm.service_type)"
@@ -684,12 +723,16 @@
 </template>
 
 <script setup>
-import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles, Palette, ExternalLink, Star, HardDrive, Database, RefreshCw, Download, Languages, SunMoon, X } from 'lucide-vue-next'
+import { Plus, Pencil, Trash2, FileText, ChevronDown, Check, Loader2, Bot, Cpu, Sparkles, Palette, ExternalLink, Star, HardDrive, Database, RefreshCw, Download, Languages, SunMoon, X, Users, Coins, Shield } from 'lucide-vue-next'
 import BaseSelect from '~/components/BaseSelect.vue'
+import TeamPanel from '~/components/settings/TeamPanel.vue'
+import WalletPanel from '~/components/settings/WalletPanel.vue'
+import AdminPanel from '~/components/settings/AdminPanel.vue'
 import { toast } from 'vue-sonner'
 import { toastError } from '~/composables/useToast'
 import { useI18n } from 'vue-i18n'
 import { aiConfigAPI, promptAPI, skillsAPI, storageAPI, stylePresetAPI, settingsAPI, serverUpdateAPI } from '~/composables/useApi'
+import { useAuthState } from '~/composables/useAuthState'
 import { useDesktopBridge } from '~/composables/useDesktopBridge'
 import { useMigrateState } from '~/composables/useMigrateState'
 import { useTheme } from '~/composables/useTheme'
@@ -698,17 +741,55 @@ import { startTour, autoTour } from '~/composables/useTour'
 import { confirmUnifiedLanguage } from '~/composables/useUnifiedLanguage'
 
 const { t, locale } = useI18n()
+const route = useRoute()
+const router = useRouter()
+const { authState, isSuperAdmin, isTeamAdmin } = useAuthState()
 
 const showBrandImage = ref(true)
-const tab = ref('ai')
-const baseTabs = computed(() => [
-  { id: 'ai', label: t('settings.tabs.ai'), icon: Cpu },
-  { id: 'general', label: t('settings.tabs.general'), icon: Languages },
-  { id: 'styles', label: t('settings.tabs.styles'), icon: Palette },
-  { id: 'agents', label: t('settings.tabs.agents'), icon: Bot },
-  { id: 'storage', label: t('settings.tabs.storage'), icon: HardDrive },
-  { id: 'about', label: t('settings.tabs.about'), icon: RefreshCw },
-])
+const VALID_TABS = ['team', 'wallet', 'admin', 'ai', 'general', 'styles', 'agents', 'storage', 'about']
+const initialTab = typeof route.query.tab === 'string' && VALID_TABS.includes(route.query.tab) ? route.query.tab : 'ai'
+const tab = ref(initialTab)
+
+const workspaceTabs = computed(() => {
+  if (!authState.enabled) return []
+  const list = [
+    { id: 'team', label: '团队与成员', icon: Users },
+    { id: 'wallet', label: '算力钱包与充值', icon: Coins },
+  ]
+  if (isSuperAdmin.value) {
+    list.push({ id: 'admin', label: '平台管理后台', icon: Shield })
+  }
+  return list
+})
+
+const baseTabs = computed(() => {
+  const all = [
+    { id: 'ai', label: t('settings.tabs.ai'), icon: Cpu },
+    { id: 'general', label: t('settings.tabs.general'), icon: Languages },
+  ]
+  if (isSuperAdmin.value) {
+    all.push(
+      { id: 'styles', label: t('settings.tabs.styles'), icon: Palette },
+      { id: 'agents', label: t('settings.tabs.agents'), icon: Bot },
+      { id: 'storage', label: t('settings.tabs.storage'), icon: HardDrive },
+      { id: 'about', label: t('settings.tabs.about'), icon: RefreshCw },
+    )
+  }
+  return all
+})
+
+function selectTab(nextTab) {
+  tab.value = nextTab
+  router.replace({ query: { ...route.query, tab: nextTab } })
+}
+
+watch(() => route.query.tab, (qTab) => {
+  if (typeof qTab === 'string' && VALID_TABS.includes(qTab) && qTab !== tab.value) {
+    tab.value = qTab
+  }
+})
+
+const canAddAiConfig = computed(() => isSuperAdmin.value || isTeamAdmin.value)
 
 // ===== AI Service Configs =====
 const cfgs = ref([])
@@ -721,7 +802,7 @@ const huobaoSaving = ref(false)
 // 火宝节点选择：默认跟随界面语言（中文→国内 .cn，其他→国外 .com），一键配置与取 Key 链接共用
 const huobaoRegion = ref(locale.value?.startsWith('zh') ? 'cn' : 'com')
 const huobaoSiteUrl = computed(() => `https://api.firemux.${huobaoRegion.value}`)
-const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', models: [], service_type: 'text', priority: 0, temperature: '' })
+const cfgForm = reactive({ name: '', provider: '', api_key: '', base_url: '', models: [], service_type: 'text', priority: 0, temperature: '', scope: 'platform' })
 // 模型标签编辑器：首位即默认模型；输入框支持回车添加、逗号/换行批量粘贴
 const modelInput = ref('')
 function addModel() {
@@ -750,7 +831,12 @@ const serviceTypes = computed(() => [
   { type: 'video', label: t('common.serviceType.video') },
 ])
 const providers = ['comfyui', 'gemini', 'openai', 'volcengine', 'minimax', 'aliyun', 'grok', 'nihapi']
-const providerSelectOptions = computed(() => providers.map(p => ({ label: p === 'grok' ? 'Grok / xAI' : p, value: p })))
+const isEditingTeamByok = computed(() => authState.enabled && (!isSuperAdmin.value || cfgForm.scope === 'team'))
+const providerSelectOptions = computed(() =>
+  providers
+    .filter(p => !(isEditingTeamByok.value && p === 'comfyui'))
+    .map(p => ({ label: p === 'grok' ? 'Grok / xAI' : p, value: p })),
+)
 const serviceMeta = computed(() => ({
   text: { label: t('common.serviceType.text'), desc: t('settings.ai.meta.text') },
   image: { label: t('common.serviceType.image'), desc: t('settings.ai.meta.image') },
@@ -793,7 +879,9 @@ function countActive(t) { return byType(t).filter(c => c.is_active).length }
 function fmtModel(m) { return Array.isArray(m) ? m.join(', ') : m || '—' }
 function presetsByType(type) {
   const group = providerPresets[type] || {}
-  return Object.entries(group).map(([provider, preset]) => ({ provider, ...preset }))
+  return Object.entries(group)
+    .filter(([provider]) => !(isEditingTeamByok.value && provider === 'comfyui'))
+    .map(([provider, preset]) => ({ provider, ...preset }))
 }
 function applyProviderPreset(type, provider) {
   const preset = providerPresets[type]?.[provider]
@@ -844,11 +932,16 @@ async function delCfg(id) { await aiConfigAPI.del(id); toast.success(t('index.de
 async function applyHuobaoQuickConfig() {
   const apiKey = huobaoApiKey.value.trim()
   if (!apiKey) { toast.warning(t('settings.ai.apiKeyRequired')); return }
+  const targetScope = isSuperAdmin.value ? 'platform' : 'team'
   huobaoSaving.value = true
   try {
     for (const preset of huobaoQuickConfigs.value) {
-      const payload = { ...preset, api_key: apiKey }
-      const existing = cfgs.value.find(c => c.name === preset.name || (c.service_type === preset.service_type && c.provider === preset.provider && c.base_url === preset.base_url))
+      const payload = { ...preset, api_key: apiKey, scope: targetScope }
+      const existing = cfgs.value.find(c =>
+        c.can_edit !== false
+        && (c.scope || 'platform') === targetScope
+        && (c.name === preset.name || (c.service_type === preset.service_type && c.provider === preset.provider && c.base_url === preset.base_url)),
+      )
       if (existing) await aiConfigAPI.update(existing.id, payload)
       else await aiConfigAPI.create(payload)
     }
@@ -864,7 +957,8 @@ async function applyHuobaoQuickConfig() {
 function startAddCfg(t) {
   cfgEditId.value = null
   cfgTestResult.value = null
-  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', models: [], service_type: t, priority: 0, temperature: '' })
+  const defaultScope = isSuperAdmin.value ? 'platform' : 'team'
+  Object.assign(cfgForm, { name: '', provider: '', api_key: '', base_url: '', models: [], service_type: t, priority: 0, temperature: '', scope: defaultScope })
   const firstPreset = presetsByType(t)[0]
   if (firstPreset) applyProviderPreset(t, firstPreset.provider)
   cfgDialog.value = true
@@ -881,6 +975,7 @@ function startEditCfg(c) {
     service_type: c.service_type,
     priority: c.priority ?? 0,
     temperature: c.temperature ?? '',
+    scope: c.scope || (c.is_byok ? 'team' : 'platform'),
   })
   cfgDialog.value = true
 }
@@ -898,6 +993,7 @@ async function testCfgPayload(payload) {
 }
 async function testDraftCfg() {
   await testCfgPayload({
+    id: cfgEditId.value || undefined,
     service_type: cfgForm.service_type,
     provider: cfgForm.provider,
     api_key: cfgForm.api_key,
@@ -908,6 +1004,7 @@ async function testDraftCfg() {
 async function testExistingCfg(c) {
   startEditCfg(c)
   await testCfgPayload({
+    id: c.id,
     service_type: c.service_type,
     provider: c.provider,
     api_key: c.api_key || '',
@@ -922,9 +1019,10 @@ async function saveCfg() {
   if (temperature !== null && (!Number.isFinite(temperature) || temperature < 0 || temperature > 2)) {
     toast.warning(t('settings.cfg.tempInvalid')); return
   }
+  const scope = isSuperAdmin.value ? (cfgForm.scope || 'platform') : 'team'
   try {
     if (cfgEditId.value) await aiConfigAPI.update(cfgEditId.value, { name: cfgForm.name, provider: cfgForm.provider, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, temperature })
-    else await aiConfigAPI.create({ service_type: cfgForm.service_type, provider: cfgForm.provider, name: cfgForm.name || `${cfgForm.provider}-${cfgForm.service_type}`, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, temperature })
+    else await aiConfigAPI.create({ scope, service_type: cfgForm.service_type, provider: cfgForm.provider, name: cfgForm.name || `${cfgForm.provider}-${cfgForm.service_type}`, api_key: cfgForm.api_key, base_url: cfgForm.base_url, model: models, priority: cfgForm.priority, temperature })
     cfgDialog.value = false; toast.success(t('common.saved')); loadCfgs()
   } catch (e) { toastError(e) }
 }
@@ -1227,14 +1325,35 @@ async function saveStyle() {
   } catch (e) { toastError(e) }
 }
 
-onMounted(() => { loadCfgs(); loadAgents(); loadAllSkills(); loadAgentPrompt(selectedAgent.value); loadStylePresets() })
+function loadSuperAdminData() {
+  if (!isSuperAdmin.value) return
+  loadAgents()
+  loadAllSkills()
+  loadAgentPrompt(selectedAgent.value)
+  loadStylePresets()
+}
+
+onMounted(() => {
+  loadCfgs()
+  loadSuperAdminData()
+})
+
+watch(() => authState.teamSwitchSeq, () => {
+  loadCfgs()
+})
+
+watch(isSuperAdmin, (val) => {
+  if (val) loadSuperAdminData()
+})
 
 // ===== 应用内引导（设置页）：快捷配置 + 手动模板两步 =====
 const SETTINGS_TOUR = [
   { element: '.quick-card', titleKey: 'tour.settings.quick.title', descKey: 'tour.settings.quick.desc', popoverSide: 'bottom' },
   { element: '.nav-item:has(.lucide-cpu), .nav-item:nth-of-type(1)', titleKey: 'tour.settings.nav.title', descKey: 'tour.settings.nav.desc', popoverSide: 'right' },
 ]
-onMounted(() => setTimeout(() => autoTour('settings', SETTINGS_TOUR, t), 800))
+onMounted(() => setTimeout(() => {
+  if (tab.value === 'ai' && canAddAiConfig.value) autoTour('settings', SETTINGS_TOUR, t)
+}, 800))
 function replaySettingsTour() { startTour('settings', SETTINGS_TOUR, t) }
 
 // ===== 存储位置 =====

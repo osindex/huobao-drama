@@ -3,7 +3,8 @@ import { and, eq, isNull } from 'drizzle-orm'
 import { db, getInsertId, schema } from '../db/index.js'
 import { success, notFound, badRequest, now } from '../utils/response.js'
 import { toSnakeCaseArray, toSnakeCase } from '../utils/transform.js'
-import { getActiveConfigId } from '../services/ai.js'
+import { getActiveConfigId, getConfigById } from '../services/ai.js'
+import { checkDramaIdAccess, checkEpisodeIdAccess, respondAccessDenied } from '../services/team-access.js'
 import { EXTRACT_TARGETS, getExtractionStatus, startExtraction, type ExtractTarget } from '../services/extraction.js'
 import { getVideoPromptBatchStatus, startVideoPromptBatch } from '../services/video-prompts.js'
 
@@ -13,6 +14,17 @@ const app = new Hono()
 app.post('/', async (c) => {
   const body = await c.req.json()
   if (!body.drama_id) return badRequest(c, 'drama_id 必填')
+  const dramaAccess = checkDramaIdAccess(Number(body.drama_id), 'write')
+  if (!dramaAccess.ok) return respondAccessDenied(c, dramaAccess)
+
+  if (body.image_config_id != null) {
+    const cfg = await getConfigById(Number(body.image_config_id))
+    if (!cfg) return badRequest(c, '所选图片生成配置不存在或无权使用')
+  }
+  if (body.video_config_id != null) {
+    const cfg = await getConfigById(Number(body.video_config_id))
+    if (!cfg) return badRequest(c, '所选视频生成配置不存在或无权使用')
+  }
 
   // 图片/视频配置：显式传入优先，缺省时自动锁定当前启用的最高优先级官方配置
   const imageConfigId = body.image_config_id ?? await getActiveConfigId('image')
@@ -23,12 +35,12 @@ app.post('/', async (c) => {
 
   // Get next episode number（忽略已软删的集，删除中间集后新集号可复用空位之后的最大值）
   const existing = await db.select().from(schema.episodes)
-    .where(and(eq(schema.episodes.dramaId, body.drama_id), isNull(schema.episodes.deletedAt)))
+    .where(and(eq(schema.episodes.dramaId, Number(body.drama_id)), isNull(schema.episodes.deletedAt)))
     .orderBy(schema.episodes.episodeNumber)
   const nextNum = existing.length ? Math.max(...existing.map(e => e.episodeNumber)) + 1 : 1
 
   const res = await db.insert(schema.episodes).values({
-    dramaId: body.drama_id,
+    dramaId: Number(body.drama_id),
     episodeNumber: nextNum,
     title: body.title || `第${nextNum}集`,
     imageConfigId,
@@ -54,6 +66,9 @@ app.post('/', async (c) => {
 // PUT /episodes/:id - Update episode fields
 app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkEpisodeIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+
   const body = await c.req.json()
 
   const allowed = ['content', 'script_content', 'title', 'description', 'status', 'resolution']
@@ -82,8 +97,9 @@ app.put('/:id', async (c) => {
 // DELETE /episodes/:id - Soft delete episode（其分镜/生成记录保留但不可达）
 app.delete('/:id', async (c) => {
   const id = Number(c.req.param('id'))
-  const [ep] = await db.select().from(schema.episodes).where(eq(schema.episodes.id, id))
-  if (!ep) return notFound(c, '剧集不存在')
+  const access = checkEpisodeIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+
   await db.update(schema.episodes).set({ deletedAt: now(), updatedAt: now() })
     .where(eq(schema.episodes.id, id))
   return success(c)
@@ -92,6 +108,9 @@ app.delete('/:id', async (c) => {
 // GET /episodes/:id/characters — characters linked to this episode
 app.get('/:id/characters', async (c) => {
   const episodeId = Number(c.req.param('id'))
+  const access = checkEpisodeIdAccess(episodeId, 'read')
+  if (!access.ok) return respondAccessDenied(c, access)
+
   const links = await db.select().from(schema.episodeCharacters)
     .where(eq(schema.episodeCharacters.episodeId, episodeId))
   const charIds = links.map(l => l.characterId)
@@ -104,6 +123,9 @@ app.get('/:id/characters', async (c) => {
 // GET /episodes/:id/scenes — scenes linked to this episode
 app.get('/:id/scenes', async (c) => {
   const episodeId = Number(c.req.param('id'))
+  const access = checkEpisodeIdAccess(episodeId, 'read')
+  if (!access.ok) return respondAccessDenied(c, access)
+
   const links = await db.select().from(schema.episodeScenes)
     .where(eq(schema.episodeScenes.episodeId, episodeId))
   const sceneIds = links.map(l => l.sceneId)
@@ -116,6 +138,9 @@ app.get('/:id/scenes', async (c) => {
 // GET /episodes/:id/props — props linked to this episode
 app.get('/:id/props', async (c) => {
   const episodeId = Number(c.req.param('id'))
+  const access = checkEpisodeIdAccess(episodeId, 'read')
+  if (!access.ok) return respondAccessDenied(c, access)
+
   const links = await db.select().from(schema.episodeProps)
     .where(eq(schema.episodeProps.episodeId, episodeId))
   const propIds = links.map(l => l.propId)
@@ -128,11 +153,13 @@ app.get('/:id/props', async (c) => {
 // POST /episodes/:id/extract — 异步提取资产（target: characters | scenes | props），立即返回，前端轮询状态
 app.post('/:id/extract', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkEpisodeIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+  const ep = access.episode!
+
   const body = await c.req.json()
   const target = body.target as ExtractTarget
   if (!EXTRACT_TARGETS.includes(target)) return badRequest(c, 'target 必须是 characters / scenes / props')
-  const [ep] = await db.select().from(schema.episodes).where(eq(schema.episodes.id, id))
-  if (!ep) return notFound(c, '剧集不存在')
   const started = startExtraction(ep.id, ep.dramaId, target, { model: body.model || undefined, configId: body.config_id ?? undefined })
   return success(c, { target, status: 'running', already_running: !started })
 })
@@ -140,15 +167,19 @@ app.post('/:id/extract', async (c) => {
 // GET /episodes/:id/extract-status — 查询三类资产提取任务状态
 app.get('/:id/extract-status', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkEpisodeIdAccess(id, 'read')
+  if (!access.ok) return respondAccessDenied(c, access)
   return success(c, getExtractionStatus(id))
 })
 
 // POST /episodes/:id/generate-video-prompts — 异步批量为缺少视频提示词的分镜生成（立即返回，前端轮询状态）
 app.post('/:id/generate-video-prompts', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkEpisodeIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+  const ep = access.episode!
+
   const body = await c.req.json().catch(() => ({}))
-  const [ep] = await db.select().from(schema.episodes).where(eq(schema.episodes.id, id))
-  if (!ep) return notFound(c, '剧集不存在')
   const storyboardIds = Array.isArray(body.storyboard_ids)
     ? body.storyboard_ids.map(Number).filter((n: number) => Number.isInteger(n) && n > 0)
     : undefined
@@ -161,12 +192,17 @@ app.post('/:id/generate-video-prompts', async (c) => {
 // GET /episodes/:id/video-prompts-status — 查询批量视频提示词任务状态
 app.get('/:id/video-prompts-status', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkEpisodeIdAccess(id, 'read')
+  if (!access.ok) return respondAccessDenied(c, access)
   return success(c, getVideoPromptBatchStatus(id))
 })
 
 // GET /episodes/:episode_id/storyboards
 app.get('/:episode_id/storyboards', async (c) => {
   const episodeId = Number(c.req.param('episode_id'))
+  const access = checkEpisodeIdAccess(episodeId, 'read')
+  if (!access.ok) return respondAccessDenied(c, access)
+
   const rows = await db.select().from(schema.storyboards)
     .where(eq(schema.storyboards.episodeId, episodeId))
     .orderBy(schema.storyboards.storyboardNumber)
@@ -212,13 +248,13 @@ app.get('/:episode_id/storyboards', async (c) => {
   })))
 })
 
-// GET /episodes/:id/pipeline-status — 流水线进度
 // GET /episodes/:id/generation-tasks — 按集聚合 sys_task + video_merges
 // sys_task 无 episode_id,通过 storyboard/scene/character/prop 关联键归属到当前集
 app.get('/:id/generation-tasks', async (c) => {
   const episodeId = Number(c.req.param('id'))
-  const [ep] = await db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId))
-  if (!ep) return notFound(c, '剧集不存在')
+  const access = checkEpisodeIdAccess(episodeId, 'read')
+  if (!access.ok) return respondAccessDenied(c, access)
+  const ep = access.episode!
 
   const sbs = await db.select().from(schema.storyboards).where(eq(schema.storyboards.episodeId, episodeId))
   const storyboardIds = new Set(sbs.map(s => s.id))
@@ -258,8 +294,9 @@ app.get('/:id/generation-tasks', async (c) => {
 
 app.get('/:id/pipeline-status', async (c) => {
   const episodeId = Number(c.req.param('id'))
-  const [ep] = await db.select().from(schema.episodes).where(eq(schema.episodes.id, episodeId))
-  if (!ep) return notFound(c, '剧集不存在')
+  const access = checkEpisodeIdAccess(episodeId, 'read')
+  if (!access.ok) return respondAccessDenied(c, access)
+  const ep = access.episode!
 
   const chars = await db.select().from(schema.characters).where(eq(schema.characters.dramaId, ep.dramaId))
   const scenes = await db.select().from(schema.scenes).where(eq(schema.scenes.dramaId, ep.dramaId))

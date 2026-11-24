@@ -6,6 +6,7 @@ import { success, created, badRequest, now } from '../utils/response.js'
 import { generateImage } from '../services/generation.js'
 import { getDramaStylePrompt } from '../services/style-preset.js'
 import { ensureSceneFinalPrompt } from '../services/final-prompt.js'
+import { checkDramaIdAccess, checkEpisodeIdAccess, checkSceneIdAccess, respondAccessDenied } from '../services/team-access.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
@@ -16,10 +17,18 @@ app.post('/', async (c) => {
   const body = await c.req.json()
   if (!body.drama_id) return badRequest(c, 'drama_id 必填')
   if (!body.location?.trim()) return badRequest(c, '地点必填')
+  const dramaAccess = checkDramaIdAccess(Number(body.drama_id), 'write')
+  if (!dramaAccess.ok) return respondAccessDenied(c, dramaAccess)
+  if (body.episode_id) {
+    const epAccess = checkEpisodeIdAccess(Number(body.episode_id), 'write')
+    if (!epAccess.ok) return respondAccessDenied(c, epAccess)
+    if (epAccess.episode!.dramaId !== Number(body.drama_id)) return badRequest(c, '剧集与项目不匹配')
+  }
+
   const ts = now()
   const res = await db.insert(schema.scenes).values({
-    dramaId: body.drama_id,
-    episodeId: body.episode_id,
+    dramaId: Number(body.drama_id),
+    episodeId: body.episode_id ? Number(body.episode_id) : null,
     location: body.location.trim(),
     time: body.time || '',
     prompt: body.prompt || body.description || body.location,
@@ -43,6 +52,9 @@ app.post('/', async (c) => {
 // PUT /scenes/:id
 app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkSceneIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+
   const body = await c.req.json()
   const updates: Record<string, any> = { updatedAt: now() }
   if (body.location !== undefined) updates.location = body.location
@@ -68,25 +80,27 @@ app.put('/:id', async (c) => {
 // POST /scenes/:id/generate-image
 app.post('/:id/generate-image', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkSceneIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+  const scene = access.scene!
+
   const body = await c.req.json()
-  const [scene] = await db.select().from(schema.scenes).where(eq(schema.scenes.id, id))
-  if (!scene) return badRequest(c, '场景不存在')
   if (!body.episode_id) return badRequest(c, 'episode_id 必填')
   const [ep] = await db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(body.episode_id)))
-  if (!ep) return badRequest(c, '剧集不存在')
+  if (!ep || ep.dramaId !== scene.dramaId) return badRequest(c, '剧集不存在')
 
-  const stylePrompt = await getDramaStylePrompt(scene.dramaId)
-  const finalPrompt = await ensureSceneFinalPrompt(scene, ep.id, false, { model: body.text_model, configId: body.text_config_id ?? undefined })
-  // 回退拼接也要守住无人物约束：场景描述(prompt)可能含人物活动，直接拼会让人混进图里
-  const prompt = finalPrompt || [
-    stylePrompt || '',
-    scene.location,
-    scene.time || '',
-    scene.prompt || '高质量场景',
-    scene.lighting || '电影感光影',
-    '画面中没有任何人物，空场景，只有场景本身',
-  ].filter(Boolean).join(', ')
   try {
+    const stylePrompt = await getDramaStylePrompt(scene.dramaId)
+    const finalPrompt = await ensureSceneFinalPrompt(scene, ep.id, false, { model: body.text_model, configId: body.text_config_id ?? undefined })
+    // 回退拼接也要守住无人物约束：场景描述(prompt)可能含人物活动，直接拼会让人混进图里
+    const prompt = finalPrompt || [
+      stylePrompt || '',
+      scene.location,
+      scene.time || '',
+      scene.prompt || '高质量场景',
+      scene.lighting || '电影感光影',
+      '画面中没有任何人物，空场景，只有场景本身',
+    ].filter(Boolean).join(', ')
     logTaskStart('SceneImage', 'generate', { sceneId: id, episodeId: ep.id, dramaId: scene.dramaId, location: scene.location })
     await db.update(schema.scenes).set({ status: 'processing', updatedAt: now() }).where(eq(schema.scenes.id, id))
     const genId = await generateImage({ sceneId: id, dramaId: scene.dramaId, prompt, model: body.model, configId: body.config_id ?? ep.imageConfigId ?? undefined })
@@ -102,27 +116,36 @@ app.post('/:id/generate-image', async (c) => {
 // POST /scenes/:id/generate-prompt — 独立生成/重新生成固定视角最终提示词（不生图）
 app.post('/:id/generate-prompt', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkSceneIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+  const scene = access.scene!
+
   const body = await c.req.json()
-  const [scene] = await db.select().from(schema.scenes).where(eq(schema.scenes.id, id))
-  if (!scene) return badRequest(c, '场景不存在')
   if (!body.episode_id) return badRequest(c, 'episode_id 必填')
 
   const [ep] = await db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(body.episode_id)))
-  if (!ep) return badRequest(c, '剧集不存在')
+  if (!ep || ep.dramaId !== scene.dramaId) return badRequest(c, '剧集不存在')
 
-  logTaskStart('FinalPrompt', 'scene-generate', { sceneId: id, episodeId: ep.id, force: !!body.force })
-  const finalPrompt = await ensureSceneFinalPrompt(scene, ep.id, !!body.force, { model: body.text_model, configId: body.text_config_id ?? undefined })
-  if (!finalPrompt) {
-    logTaskError('FinalPrompt', 'scene-generate', { sceneId: id, error: 'agent returned empty prompt' })
-    return badRequest(c, '最终提示词生成失败，请重试')
+  try {
+    logTaskStart('FinalPrompt', 'scene-generate', { sceneId: id, episodeId: ep.id, force: !!body.force })
+    const finalPrompt = await ensureSceneFinalPrompt(scene, ep.id, !!body.force, { model: body.text_model, configId: body.text_config_id ?? undefined })
+    if (!finalPrompt) {
+      logTaskError('FinalPrompt', 'scene-generate', { sceneId: id, error: 'agent returned empty prompt' })
+      return badRequest(c, '最终提示词生成失败，请重试')
+    }
+    logTaskSuccess('FinalPrompt', 'scene-generate', { sceneId: id })
+    return success(c, { final_prompt: finalPrompt })
+  } catch (err: any) {
+    return badRequest(c, err.message || '提示词生成失败')
   }
-  logTaskSuccess('FinalPrompt', 'scene-generate', { sceneId: id })
-  return success(c, { final_prompt: finalPrompt })
 })
 
 // DELETE /scenes/:id — 软删除（保留历史生成记录）
 app.delete('/:id', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkSceneIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+
   await db.update(schema.scenes).set({ deletedAt: now(), updatedAt: now() }).where(eq(schema.scenes.id, id))
   return success(c)
 })

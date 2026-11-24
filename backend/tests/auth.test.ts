@@ -1,9 +1,20 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { Hono } from 'hono'
-import auth from '../src/routes/auth.js'
-import { requestLogger } from '../src/middleware/logger.js'
-import { createSession, requireAuth, requirePageAuth, sessionCookie, verifyPassword } from '../src/services/auth.js'
+
+const root = await fs.mkdtemp(path.join(os.tmpdir(), 'huobao-auth-test-'))
+process.env.SQLITE_PATH = path.join(root, 'auth.sqlite3')
+process.env.HUOBAO_DATA_DIR = root
+process.env.STORAGE_PATH = path.join(root, 'static')
+process.env.MYSQL_AUTO_IMPORT = 'false'
+
+const { sqlite } = await import('../src/db/index.js')
+const auth = (await import('../src/routes/auth.js')).default
+const { requestLogger } = await import('../src/middleware/logger.js')
+const { createSession, requireAuth, requirePageAuth, sessionCookie, verifyPassword } = await import('../src/services/auth.js')
 
 function app() {
   const api = new Hono()
@@ -101,4 +112,9 @@ test('real login/logout, CSRF, expiry, body limits, throttling and secret-free l
     delete process.env.AUTH_COOKIE_SECURE
     delete process.env.PUBLIC_BASE_URL
   }
+})
+
+test.after(async () => {
+  sqlite.close()
+  await fs.rm(root, { recursive: true, force: true })
 })

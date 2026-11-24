@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm'
 import { db, getInsertId, schema } from '../db/index.js'
 import { success, created, now, badRequest } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
+import { checkEpisodeIdAccess, checkStoryboardIdAccess, respondAccessDenied } from '../services/team-access.js'
 import { logTaskPayload, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
@@ -10,7 +11,6 @@ const app = new Hono()
 async function syncStoryboardCharacters(storyboardId: number, characterIds: number[]) {
   await db.delete(schema.storyboardCharacters)
     .where(eq(schema.storyboardCharacters.storyboardId, storyboardId))
-
 
   const uniqueIds = [...new Set((characterIds || []).filter(Boolean))]
   if (!uniqueIds.length) return
@@ -79,6 +79,9 @@ async function validateStoryboardBindings(episodeId: number, sceneId: number | n
 // POST /storyboards
 app.post('/', async (c) => {
   const body = await c.req.json()
+  const epAccess = checkEpisodeIdAccess(Number(body.episode_id), 'write')
+  if (!epAccess.ok) return respondAccessDenied(c, epAccess)
+
   const ts = now()
   logTaskStart('StoryboardAPI', 'create', {
     episodeId: body.episode_id,
@@ -87,9 +90,9 @@ app.post('/', async (c) => {
     characterIds: body.character_ids,
   })
   logTaskPayload('StoryboardAPI', 'create body', body)
-  await validateStoryboardBindings(body.episode_id, body.scene_id, body.character_ids, body.prop_ids)
+  await validateStoryboardBindings(Number(body.episode_id), body.scene_id, body.character_ids, body.prop_ids)
   const res = await db.insert(schema.storyboards).values({
-    episodeId: body.episode_id,
+    episodeId: Number(body.episode_id),
     storyboardNumber: body.storyboard_number || 1,
     title: body.title,
     description: body.description,
@@ -117,9 +120,11 @@ app.post('/', async (c) => {
 // PUT /storyboards/:id
 app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkStoryboardIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+  const storyboard = access.storyboard!
+
   const body = await c.req.json()
-  const [storyboard] = await db.select().from(schema.storyboards).where(eq(schema.storyboards.id, id))
-  if (!storyboard) return badRequest(c, '镜头不存在')
   logTaskStart('StoryboardAPI', 'update', {
     storyboardId: id,
     episodeId: storyboard.episodeId,
@@ -164,6 +169,9 @@ app.put('/:id', async (c) => {
 // DELETE /storyboards/:id
 app.delete('/:id', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkStoryboardIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+
   logTaskStart('StoryboardAPI', 'delete', { storyboardId: id })
   await db.delete(schema.storyboardCharacters).where(eq(schema.storyboardCharacters.storyboardId, id))
   await db.delete(schema.storyboardProps).where(eq(schema.storyboardProps.storyboardId, id))

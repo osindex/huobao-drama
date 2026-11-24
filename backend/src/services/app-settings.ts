@@ -48,20 +48,22 @@ function sanitizeTourIds(ids: unknown): string[] {
   return [...new Set(ids.filter(v => typeof v === 'string' && v.length > 0 && v.length <= 100))].slice(0, MAX_TOURS_SEEN)
 }
 
-/** 已看过的引导漫游 id 列表（JSON 数组存储）；桌面端端口随启动变化，localStorage 不可靠，故落库 */
-export function getToursSeen(): string[] {
+/** 已看过的引导漫游 id 列表（JSON 数组存储）；开启多用户认证时按用户独立存储 */
+export function getToursSeen(userId?: number | null): string[] {
+  const key = userId ? `${TOURS_SEEN_KEY}:user:${userId}` : TOURS_SEEN_KEY
   const row = db.select().from(schema.appSettings)
-    .where(eq(schema.appSettings.key, TOURS_SEEN_KEY))
+    .where(eq(schema.appSettings.key, key))
     .get()
   try { return sanitizeTourIds(JSON.parse(row?.value || '[]')) } catch { return [] }
 }
 
 /** 写入已看过的引导漫游 id 列表（upsert） */
-export function setToursSeen(ids: unknown): string[] {
+export function setToursSeen(ids: unknown, userId?: number | null): string[] {
+  const key = userId ? `${TOURS_SEEN_KEY}:user:${userId}` : TOURS_SEEN_KEY
   const clean = sanitizeTourIds(ids)
   const value = JSON.stringify(clean)
   db.insert(schema.appSettings)
-    .values({ key: TOURS_SEEN_KEY, value, updatedAt: now() })
+    .values({ key, value, updatedAt: now() })
     .onConflictDoUpdate({
       target: schema.appSettings.key,
       set: { value, updatedAt: now() },

@@ -3,8 +3,16 @@ import { bodyLimit } from 'hono/body-limit'
 import { success, badRequest } from '../utils/response.js'
 import { saveUploadedFile, generateImageThumb } from '../utils/storage.js'
 import { AUDIO_MAX_BYTES, AudioUploadError, saveAudioUpload } from '../utils/audio-upload.js'
+import { canWriteInTeam } from '../services/team-access.js'
 
 const app = new Hono()
+
+app.use('*', async (c, next) => {
+  if (!canWriteInTeam()) {
+    return c.json({ code: 403, message: '当前团队角色为只读访客，无权上传素材' }, 403)
+  }
+  return next()
+})
 
 // POST /upload/image
 app.post('/image', async (c) => {

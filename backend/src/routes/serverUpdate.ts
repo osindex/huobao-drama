@@ -3,6 +3,7 @@
  */
 import { Hono } from 'hono'
 import { getServerUpdateState, checkServerUpdate, triggerWatchtowerUpdate } from '../services/server-update.js'
+import { requireSuperAdmin } from '../services/team-access.js'
 import { success, badRequest } from '../utils/response.js'
 
 const app = new Hono()
@@ -10,11 +11,11 @@ const app = new Hono()
 // GET /state — 当前版本 + 更新模式 + 上次检查结果
 app.get('/state', (c) => success(c, getServerUpdateState()))
 
-// POST /check — 拉取发布清单比较版本
-app.post('/check', async (c) => success(c, await checkServerUpdate()))
+// POST /check — 拉取发布清单比较版本（仅超级管理员）
+app.post('/check', requireSuperAdmin, async (c) => success(c, await checkServerUpdate()))
 
-// POST /apply — 触发 Watchtower 拉新镜像并重建本容器（仅 watchtower 模式可用）
-app.post('/apply', async (c) => {
+// POST /apply — 触发 Watchtower 拉新镜像并重建本容器（仅超级管理员）
+app.post('/apply', requireSuperAdmin, async (c) => {
   try {
     await triggerWatchtowerUpdate()
     return success(c, { triggered: true })

@@ -2,13 +2,15 @@
  * 统一生成任务服务 — 图片/视频生成共用 sys_task 表与同一条生命周期：
  * 创建(processing) → 适配器构建请求 → 同步完成或异步轮询 → 下载落盘 → 回写业务表
  */
-import { db, getInsertId, schema } from '../db/index.js'
+import { db, getInsertId, schema, sqlite } from '../db/index.js'
 import { and, desc, eq, gt, sql } from 'drizzle-orm'
 import fs from 'node:fs'
 import { getAbsolutePath } from '../utils/storage.js'
 import { downloadVideo, safeTaskError } from './video-download.js'
 import { prepareReferenceAudio, resolveReferenceAudioUrls } from './reference-audio.js'
 import { getActiveConfig, getConfigById } from './ai.js'
+import { getRequestActor } from './auth.js'
+import { freezeCreditsInTx, refreezeTaskCreditsOnRecover, refundTaskCredits, settleTaskCredits } from './billing.js'
 import { now } from '../utils/response.js'
 import { resolveAssetReference } from './asset-reference.js'
 import { downloadFile, fetchImageAsCompressedDataUrl, generateImageThumb, readImageAsCompressedDataUrl, readImageAsDataUrl, saveBase64Image } from '../utils/storage.js'
@@ -35,6 +37,7 @@ export async function stopVideoTask(id: number) {
   await db.update(schema.sysTask).set({ status: 'failed', stage: 'stopped', errorCode: 'user_cancelled',
     errorMsg: '已手动停止，可修改分镜后重新生成', updatedAt: now() })
     .where(and(eq(schema.sysTask.id, id), eq(schema.sysTask.status, 'processing')))
+  refundTaskCredits(id, '手动停止任务，退回预扣算力')
 }
 function runBackground(id: number, job: () => Promise<void>) {
   if (activeTasks.has(id)) return
@@ -62,6 +65,9 @@ interface GenerateImageParams {
   referenceImages?: string[]
   frameType?: string
   configId?: number
+  skipBilling?: boolean
+  internalTeamId?: number | null
+  internalUserId?: number | null
 }
 
 interface GenerateVideoParams {
@@ -114,6 +120,10 @@ export async function generateImage(params: GenerateImageParams): Promise<number
     referenceImages: reference?.referenceImages || params.referenceImages,
     referenceAsset: reference?.referenceAsset,
     requireReferenceImages: !!reference,
+  }, {
+    skipBilling: params.skipBilling,
+    internalTeamId: params.internalTeamId,
+    internalUserId: params.internalUserId,
   })
 
   logTaskStart('ImageTask', 'enqueue', {
@@ -209,22 +219,56 @@ async function createTask(
     model?: string | null
   },
   params: Record<string, unknown>,
+  billingOpts?: {
+    skipBilling?: boolean
+    internalTeamId?: number | null
+    internalUserId?: number | null
+  },
 ): Promise<number> {
   const ts = now()
-  const res = await db.insert(schema.sysTask).values({
-    type,
-    ...fields,
-    provider: config.provider,
-    configId: config.id,
-    configBaseUrl: config.baseUrl,
-    stage: 'submitting',
-    params: JSON.stringify(params),
-    status: 'processing',
-    createdAt: ts,
-    updatedAt: ts,
-  })
+  const actor = getRequestActor()
+  const teamId = billingOpts?.internalTeamId !== undefined ? billingOpts.internalTeamId : (actor?.team.id ?? null)
+  const userId = billingOpts?.internalUserId !== undefined ? billingOpts.internalUserId : (actor?.user.id ?? null)
+  const effectiveModel = fields.model || config.model
 
-  const id = getInsertId(res)
+  const id = sqlite.transaction(() => {
+    const res = db.insert(schema.sysTask).values({
+      type,
+      ...fields,
+      teamId,
+      userId,
+      provider: config.provider,
+      configId: config.id,
+      configBaseUrl: config.baseUrl,
+      stage: 'submitting',
+      params: JSON.stringify(params),
+      status: 'processing',
+      createdAt: ts,
+      updatedAt: ts,
+    }).run()
+
+    const taskId = getInsertId(res)
+    if (billingOpts?.skipBilling) {
+      sqlite.prepare("UPDATE sys_task SET frozen_credits = 0, settled_credits = 0, billing_status = 'none' WHERE id = ?").run(taskId)
+    } else {
+      freezeCreditsInTx({
+        taskId,
+        teamId,
+        userId,
+        isByok: Boolean(config.teamId),
+        serviceType: type,
+        provider: config.provider,
+        model: effectiveModel,
+        duration: type === 'video' ? Number(params.duration || 5) : null,
+        resolution: type === 'video' ? String(params.resolution || '720p') : null,
+        description: type === 'image'
+          ? `生图预扣（${config.provider}/${effectiveModel || 'default'}）`
+          : `生视频预扣（${config.provider}/${effectiveModel || 'default'}，${Number(params.duration) || 5}s）`,
+      })
+    }
+    return taskId
+  })()
+
   runBackground(id, () => processTask(id, config))
   return id
 }
@@ -282,6 +326,9 @@ async function processTask(id: number, config: AIConfig) {
           prompt: `根据参考图片制作一张完整电影分镜画面，保持参考人物的身份和服装。画面要求：${record.prompt}`,
           referenceImages: refs,
           size: params.aspectRatio === '9:16' ? '720x1280' : params.aspectRatio === '1:1' ? '1024x1024' : '1280x720',
+          skipBilling: true,
+          internalTeamId: record.teamId,
+          internalUserId: record.userId,
         })
         params.compositionTaskId = imageTaskId
         await db.update(schema.sysTask).set({ params: JSON.stringify(params), stage: 'composing' }).where(and(eq(schema.sysTask.id, id), eq(schema.sysTask.status, 'processing')))
@@ -463,6 +510,7 @@ async function failTask(id: number, message: string, code?: string) {
   await db.update(schema.sysTask)
     .set({ status: 'failed', errorMsg: safeTaskError(message), ...(code ? { errorCode: code } : {}), updatedAt: now() })
     .where(and(eq(schema.sysTask.id, id), sql`coalesce(${schema.sysTask.errorCode}, '') != 'user_cancelled'`))
+  refundTaskCredits(id, '生成任务失败，自动退回预扣算力')
 }
 
 type SysTaskRecord = typeof schema.sysTask.$inferSelect
@@ -595,6 +643,7 @@ async function handleImageComplete(record: SysTaskRecord, imageUrl: string) {
   await db.update(schema.sysTask)
     .set({ resultUrl: imageUrl, localPath, status: 'completed', stage: 'completed', errorMsg: null, errorCode: null, completedAt: now(), updatedAt: now() })
     .where(eq(schema.sysTask.id, record.id))
+  settleTaskCredits(record.id)
 
   logTaskSuccess('ImageTask', 'downloaded', { id: record.id, provider: record.provider, localPath })
 
@@ -616,6 +665,7 @@ export async function recoverImageTask(id: number) {
       : record.storyboardId ? eq(schema.sysTask.storyboardId, record.storyboardId) : eq(schema.sysTask.id, id),
   )).limit(1)
   if (newer.length) throw new Error('该素材已有更新的生成任务，请先处理新任务')
+  refreezeTaskCreditsOnRecover(id)
   runBackground(id, () => handleImageComplete(record, record.resultUrl!))
 }
 
@@ -626,6 +676,7 @@ async function handleImageCompleteBase64(record: SysTaskRecord, base64Data: stri
   await db.update(schema.sysTask)
     .set({ localPath, status: 'completed', completedAt: now(), updatedAt: now() })
     .where(eq(schema.sysTask.id, record.id))
+  settleTaskCredits(record.id)
 
   logTaskSuccess('ImageTask', 'saved-base64', { id: record.id, provider: record.provider, mimeType, localPath })
 
@@ -675,6 +726,7 @@ async function handleVideoComplete(record: SysTaskRecord, videoUrl: string, dura
     await db.update(schema.sysTask).set({ localPath, stage: 'saving', updatedAt: now() }).where(and(eq(schema.sysTask.id, record.id), eq(schema.sysTask.status, 'processing')))
     await extractVideoPoster(localPath)
     // 完成状态与业务回写原子提交；恢复旧任务不能覆盖用户后来生成的视频。
+    let markedCompleted = false
     db.transaction(tx => {
       const current = tx.select({ errorCode: schema.sysTask.errorCode }).from(schema.sysTask).where(eq(schema.sysTask.id, record.id)).get()
       if (current?.errorCode === 'user_cancelled') return
@@ -685,7 +737,9 @@ async function handleVideoComplete(record: SysTaskRecord, videoUrl: string, dura
         .where(eq(schema.storyboards.id, record.storyboardId)).run()
       tx.update(schema.sysTask).set({ localPath, status: 'completed', stage: 'completed', errorCode: null,
         errorMsg: null, completedAt: now(), updatedAt: now() }).where(eq(schema.sysTask.id, record.id)).run()
+      markedCompleted = true
     })
+    if (markedCompleted) settleTaskCredits(record.id, duration)
   } catch (error) {
     await failTask(record.id, safeTaskError(error), 'delivery_failed')
   }
@@ -693,14 +747,14 @@ async function handleVideoComplete(record: SysTaskRecord, videoUrl: string, dura
 
 async function recoveryConfig(record: SysTaskRecord): Promise<AIConfig> {
   if (record.configId) {
-    const config = await getConfigById(record.configId)
+    const config = await getConfigById(record.configId, { internalRecovery: true })
     if (config && config.provider === record.provider && config.baseUrl === record.configBaseUrl) return config
     throw new Error('原视频服务配置已删除、停用或地址变更，请恢复原配置')
   }
   // 旧任务只在同厂商唯一配置时恢复，绝不任意换服务商查询。
   const rows = (await db.select().from(schema.aiServiceConfigs)).filter(c => c.isActive && c.serviceType === 'video' && c.provider === record.provider)
   if (rows.length === 1) {
-    const config = await getConfigById(rows[0].id)
+    const config = await getConfigById(rows[0].id, { internalRecovery: true })
     if (config) return config
   }
   throw new Error('历史任务无法确定原服务配置，请先核对配置')
@@ -717,6 +771,7 @@ export async function recoverVideoTask(id: number): Promise<void> {
   activeTasks.add(id)
   try {
     const config = record.taskId && !record.resultUrl ? await recoveryConfig(record) : null
+    refreezeTaskCreditsOnRecover(id)
     const resumed = await db.update(schema.sysTask).set({ status: 'processing', errorMsg: null, errorCode: null,
       stage: record.resultUrl ? 'downloading' : record.stage === 'transferring' || record.errorCode === 'delivery_failed' ? 'transferring' : 'polling', updatedAt: now() })
       .where(and(eq(schema.sysTask.id, id), sql`coalesce(${schema.sysTask.errorCode}, '') != 'user_cancelled'`)).returning({ id: schema.sysTask.id })

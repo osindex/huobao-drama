@@ -2,6 +2,13 @@ import { and, eq, isNull } from 'drizzle-orm'
 import type { Hono } from 'hono'
 import { db, schema } from '../db/index.js'
 import { success, badRequest, now } from '../utils/response.js'
+import {
+  checkCharacterIdAccess,
+  checkPropIdAccess,
+  checkSceneIdAccess,
+  respondAccessDenied,
+  type AccessMode,
+} from './team-access.js'
 
 const tables = { character: schema.characters, scene: schema.scenes, prop: schema.props }
 export type AssetKind = keyof typeof tables
@@ -20,11 +27,20 @@ function sourceFor(kind: AssetKind, target: NonNullable<ReturnType<typeof asset>
   return source
 }
 
+function checkAssetAccess(kind: AssetKind, id: number, mode: AccessMode) {
+  if (kind === 'character') return checkCharacterIdAccess(id, mode)
+  if (kind === 'scene') return checkSceneIdAccess(id, mode)
+  return checkPropIdAccess(id, mode)
+}
+
 /** Reference settings are independent of the final-prompt editor. */
 export function registerAssetReferenceRoutes(app: Hono, kind: AssetKind) {
   app.get('/:id/reference', c => {
-    const target = asset(kind, Number(c.req.param('id')))
+    const id = Number(c.req.param('id'))
+    const target = asset(kind, id)
     if (!target) return badRequest(c, '素材不存在')
+    const access = checkAssetAccess(kind, id, 'read')
+    if (!access.ok) return respondAccessDenied(c, access)
     const table = tables[kind]
     const candidates = db.select().from(table).where(and(eq(table.dramaId, target.dramaId), isNull(table.deletedAt))).all()
       .filter(row => row.id !== target.id)
@@ -33,8 +49,11 @@ export function registerAssetReferenceRoutes(app: Hono, kind: AssetKind) {
   })
   app.put('/:id/reference', async c => {
     try {
-      const target = asset(kind, Number(c.req.param('id')))
+      const targetId = Number(c.req.param('id'))
+      const target = asset(kind, targetId)
       if (!target) return badRequest(c, '素材不存在')
+      const access = checkAssetAccess(kind, targetId, 'write')
+      if (!access.ok) return respondAccessDenied(c, access)
       const body = await c.req.json()
       const id = body.reference_asset_id
       if (id !== null && (!Number.isSafeInteger(id) || id <= 0)) return badRequest(c, '参考素材编号无效')

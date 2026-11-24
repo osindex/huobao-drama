@@ -46,13 +46,19 @@ export function mapError(err: unknown, opts?: { fallback?: string }): string {
   if (NETWORK_RE.test(msg)) return t('errors.network')
   if (err instanceof SyntaxError || NONJSON_RE.test(msg)) return t('errors.server')
   if (MODERATION_RE.test(msg)) return t('errors.moderation')
+
+  // 多租户计费、卡密、团队与角色权限等业务级明确中文提示优先原样透出
+  if (/算力不足|算力限额|充值卡密|只读访客|仅团队|仅平台超级管理员|邀请码|无权/.test(msg) && !TECHY_RE.test(msg)) {
+    return msg
+  }
+
   if (AUTH_RE.test(msg)) return t('errors.auth')
   if (RATELIMIT_RE.test(msg)) return t('errors.rateLimit')
   if (SERVER5XX_RE.test(msg)) return t('errors.unavailable')
   if (TIMEOUT_RE.test(msg)) return t('errors.timeout')
 
-  // 后端友好中文（短、含中文、无技术特征）直接透传
-  if (msg.length <= 40 && CJK_RE.test(msg) && !TECHY_RE.test(msg)) return msg
+  // 后端友好中文（含中文、无技术特征）直接透传
+  if (msg.length <= 120 && CJK_RE.test(msg) && !TECHY_RE.test(msg)) return msg
 
   if (/^\d{3}$/.test(msg)) return t('errors.requestFailed', { status: msg })
 

@@ -5,6 +5,7 @@
  */
 import { mastra } from '../mastra/index.js'
 import { buildAgentRequestContext } from '../agents/context.js'
+import { chargeTextAgentCall } from './billing.js'
 import { logTaskError, logTaskProgress, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 export type ExtractTarget = 'characters' | 'scenes' | 'props'
@@ -37,6 +38,11 @@ export function startExtraction(episodeId: number, dramaId: number, target: Extr
 
   logTaskStart('Extract', target, { episodeId, dramaId, model: opts.model || undefined, configId: opts.configId || undefined })
   ;(async () => {
+    await chargeTextAgentCall({
+      model: opts.model,
+      configId: opts.configId,
+      description: `剧本资产提取（${target}）`,
+    })
     const agent = mastra.getAgent('extractor')
     if (!agent) throw new Error('提取 Agent 不可用')
     const requestContext = buildAgentRequestContext({

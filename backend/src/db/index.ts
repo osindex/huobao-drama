@@ -17,11 +17,11 @@ const repoRoot = path.resolve(__dirname, '../../..')
 export const dbPath = process.env.SQLITE_PATH || path.join(repoRoot, 'data', 'huobao.sqlite3')
 fs.mkdirSync(path.dirname(dbPath), { recursive: true })
 
-const sqlite = new Database(dbPath)
+const sqlite: Database.Database = new Database(dbPath)
 
-// WAL：生成任务轮询与页面读并发时不互相阻塞；busy_timeout 兜底写锁竞争
+// busy_timeout 必须最先设置，避免多进程/并发启动切 WAL 时触发 SQLITE_BUSY
+sqlite.pragma('busy_timeout = 10000')
 sqlite.pragma('journal_mode = WAL')
-sqlite.pragma('busy_timeout = 5000')
 sqlite.pragma('synchronous = NORMAL')
 
 /** 启动建表（DDL 幂等重放 + 种子补缺）。SQLite 无连接就绪问题，无需重试 */
@@ -44,5 +44,5 @@ export function getInsertId(result: unknown) {
 }
 
 export const db = drizzle(sqlite, { schema })
-export { schema }
+export { schema, sqlite }
 export type DB = typeof db

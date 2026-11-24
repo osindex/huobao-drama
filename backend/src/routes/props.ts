@@ -7,6 +7,7 @@ import { toSnakeCase } from '../utils/transform.js'
 import { generateImage } from '../services/generation.js'
 import { getDramaStylePrompt } from '../services/style-preset.js'
 import { ensurePropFinalPrompt } from '../services/final-prompt.js'
+import { checkDramaIdAccess, checkEpisodeIdAccess, checkPropIdAccess, respondAccessDenied } from '../services/team-access.js'
 import { logTaskError, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
@@ -19,12 +20,20 @@ app.post('/', async (c) => {
   const body = await c.req.json()
   if (!body.drama_id) return badRequest(c, 'drama_id 必填')
   if (!body.name?.trim()) return badRequest(c, '名称必填')
+  const dramaAccess = checkDramaIdAccess(Number(body.drama_id), 'write')
+  if (!dramaAccess.ok) return respondAccessDenied(c, dramaAccess)
+  if (body.episode_id) {
+    const epAccess = checkEpisodeIdAccess(Number(body.episode_id), 'write')
+    if (!epAccess.ok) return respondAccessDenied(c, epAccess)
+    if (epAccess.episode!.dramaId !== Number(body.drama_id)) return badRequest(c, '剧集与项目不匹配')
+  }
+
   const ts = now()
   const res = await db.insert(schema.props).values({
     name: body.name.trim(),
     type: body.type || '',
     description: body.description || '',
-    dramaId: body.drama_id,
+    dramaId: Number(body.drama_id),
     createdAt: ts,
     updatedAt: ts,
   })
@@ -43,6 +52,9 @@ app.post('/', async (c) => {
 // DELETE /props/:id — 软删除
 app.delete('/:id', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkPropIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+
   await db.update(schema.props).set({ deletedAt: now(), updatedAt: now() }).where(eq(schema.props.id, id))
   return success(c)
 })
@@ -50,6 +62,9 @@ app.delete('/:id', async (c) => {
 // PUT /props/:id — 更新道具（物品外貌/类型/最终提示词）
 app.put('/:id', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkPropIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+
   const body = await c.req.json()
   const updates: Record<string, any> = { updatedAt: now() }
   if (body.name !== undefined) updates.name = body.name
@@ -84,39 +99,47 @@ function propImagePrompt(prop: typeof schema.props.$inferSelect, stylePrompt = '
 // POST /props/:id/generate-prompt — 独立生成/重新生成白底单品最终提示词（不生图）
 app.post('/:id/generate-prompt', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkPropIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+  const prop = access.prop!
+
   const body = await c.req.json()
-  const [prop] = await db.select().from(schema.props).where(eq(schema.props.id, id))
-  if (!prop) return badRequest(c, '道具不存在')
   if (!body.episode_id) return badRequest(c, 'episode_id 必填')
 
   const [ep] = await db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(body.episode_id)))
-  if (!ep) return badRequest(c, '剧集不存在')
+  if (!ep || ep.dramaId !== prop.dramaId) return badRequest(c, '剧集不存在')
 
-  logTaskStart('FinalPrompt', 'prop-generate', { propId: id, episodeId: ep.id, force: !!body.force })
-  const finalPrompt = await ensurePropFinalPrompt(prop, ep.id, !!body.force, { model: body.text_model, configId: body.text_config_id ?? undefined })
-  if (!finalPrompt) {
-    logTaskError('FinalPrompt', 'prop-generate', { propId: id, error: 'agent returned empty prompt' })
-    return badRequest(c, '最终提示词生成失败，请重试')
+  try {
+    logTaskStart('FinalPrompt', 'prop-generate', { propId: id, episodeId: ep.id, force: !!body.force })
+    const finalPrompt = await ensurePropFinalPrompt(prop, ep.id, !!body.force, { model: body.text_model, configId: body.text_config_id ?? undefined })
+    if (!finalPrompt) {
+      logTaskError('FinalPrompt', 'prop-generate', { propId: id, error: 'agent returned empty prompt' })
+      return badRequest(c, '最终提示词生成失败，请重试')
+    }
+    logTaskSuccess('FinalPrompt', 'prop-generate', { propId: id })
+    return success(c, { final_prompt: finalPrompt })
+  } catch (err: any) {
+    return badRequest(c, err.message || '提示词生成失败')
   }
-  logTaskSuccess('FinalPrompt', 'prop-generate', { propId: id })
-  return success(c, { final_prompt: finalPrompt })
 })
 
 // POST /props/:id/generate-image — 生成道具白底单品图
 app.post('/:id/generate-image', async (c) => {
   const id = Number(c.req.param('id'))
+  const access = checkPropIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+  const prop = access.prop!
+
   const body = await c.req.json()
-  const [prop] = await db.select().from(schema.props).where(eq(schema.props.id, id))
-  if (!prop) return badRequest(c, '道具不存在')
   if (!body.episode_id) return badRequest(c, 'episode_id 必填')
 
   const [ep] = await db.select().from(schema.episodes).where(eq(schema.episodes.id, Number(body.episode_id)))
-  if (!ep) return badRequest(c, '剧集不存在')
+  if (!ep || ep.dramaId !== prop.dramaId) return badRequest(c, '剧集不存在')
 
-  const stylePrompt = await getDramaStylePrompt(prop.dramaId)
-  const finalPrompt = await ensurePropFinalPrompt(prop, ep.id, false, { model: body.text_model, configId: body.text_config_id ?? undefined })
-  const prompt = finalPrompt || propImagePrompt(prop, stylePrompt)
   try {
+    const stylePrompt = await getDramaStylePrompt(prop.dramaId)
+    const finalPrompt = await ensurePropFinalPrompt(prop, ep.id, false, { model: body.text_model, configId: body.text_config_id ?? undefined })
+    const prompt = finalPrompt || propImagePrompt(prop, stylePrompt)
     logTaskStart('PropImage', 'generate', { propId: id, episodeId: ep.id, dramaId: prop.dramaId })
     const genId = await generateImage({ propId: id, dramaId: prop.dramaId, prompt, model: body.model, size: PROP_IMAGE_SIZE, configId: body.config_id ?? ep.imageConfigId ?? undefined })
     logTaskSuccess('PropImage', 'generate', { propId: id, generationId: genId })

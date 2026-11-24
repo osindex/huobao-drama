@@ -8,6 +8,7 @@ import { success, badRequest } from '../utils/response.js'
 import { skillsManagerWorkspace } from '../agents/skills.js'
 import { validAgentTypes, DEFAULT_PROMPTS } from '../agents/index.js'
 import { loadAgentPromptFile, serializePromptFile, promptFilePath } from '../agents/prompts.js'
+import { requireSuperAdmin } from '../services/team-access.js'
 
 const app = new Hono()
 const fsm = () => skillsManagerWorkspace.filesystem!
@@ -63,7 +64,7 @@ app.get('/:type', async (c) => {
 })
 
 // PUT /prompts/:type?lang= — 保存为 prompt 文件（lang 非 zh 写语言变体；model 只随基础版保存）
-app.put('/:type', async (c) => {
+app.put('/:type', requireSuperAdmin, async (c) => {
   const type = c.req.param('type')
   if (!checkType(type)) return badRequest(c, '未知的 Agent 类型')
   const body = await c.req.json()
@@ -84,7 +85,7 @@ app.put('/:type', async (c) => {
 })
 
 // POST /prompts/:type/reset?lang= — 删除对应语言文件，回退（变体→基础版；基础版→代码默认）
-app.post('/:type/reset', async (c) => {
+app.post('/:type/reset', requireSuperAdmin, async (c) => {
   const type = c.req.param('type')
   if (!checkType(type)) return badRequest(c, '未知的 Agent 类型')
   const lang = normalizeLang(c.req.query('lang'))

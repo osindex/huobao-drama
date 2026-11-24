@@ -5,9 +5,12 @@ import { success, notFound, created, badRequest, now } from '../utils/response.j
 import { toSnakeCase } from '../utils/transform.js'
 import { joinProviderUrl } from '../services/adapters/url.js'
 import { isOfficialProvider, parseConfigTemperature } from '../services/ai.js'
+import { getRequestActor, type ActorContext } from '../services/auth.js'
+import { isSuperAdmin, isTeamAdmin, validateSafeExternalBaseUrl } from '../services/team-access.js'
 import { redactUrl, logTaskError, logTaskProgress, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
+const MASKED_KEY = '********'
 
 /** 归一化 temperature 入参：null=未设置；合法值 0~2；非法抛错 */
 function normalizeTemperature(v: any): number | null {
@@ -17,10 +20,32 @@ function normalizeTemperature(v: any): number | null {
   return n
 }
 
-/** 把 settings JSON 中的 temperature 透出为顶层字段，便于前端直接读写 */
-function withParsedFields(r: any) {
+function canViewConfigRow(r: typeof schema.aiServiceConfigs.$inferSelect, actor: ActorContext | null): boolean {
+  if (!actor) return r.teamId == null
+  return r.teamId == null || r.teamId === actor.team.id
+}
+
+function canEditConfigRow(r: typeof schema.aiServiceConfigs.$inferSelect, actor: ActorContext | null): boolean {
+  if (!actor) return r.teamId == null
+  if (r.teamId == null) return isSuperAdmin(actor)
+  return r.teamId === actor.team.id && isTeamAdmin(actor)
+}
+
+/** 把 settings JSON 中的 temperature 透出为顶层字段；对无编辑权用户脱敏 api_key 与内网 base_url */
+function withParsedFields(r: typeof schema.aiServiceConfigs.$inferSelect, actor: ActorContext | null = getRequestActor()) {
+  const editable = canEditConfigRow(r, actor)
+  const base = toSnakeCase(r)
   return {
-    ...toSnakeCase(r),
+    ...base,
+    scope: r.teamId ? 'team' : 'platform',
+    is_byok: Boolean(r.teamId),
+    can_edit: editable,
+    api_key: !actor
+      ? r.apiKey
+      : editable
+        ? (r.apiKey ? MASKED_KEY : '')
+        : (r.apiKey ? MASKED_KEY : ''),
+    base_url: editable ? r.baseUrl : '',
     model: r.model ? JSON.parse(r.model) : [],
     temperature: parseConfigTemperature(r.settings),
   }
@@ -125,16 +150,19 @@ function buildProbe(serviceType: string, provider: string, baseUrl: string, mode
 
 // GET /ai-configs?service_type=text
 app.get('/', async (c) => {
+  const actor = getRequestActor()
   const serviceType = c.req.query('service_type')
-  let rows = await db.select().from(schema.aiServiceConfigs)
+  let rows = (await db.select().from(schema.aiServiceConfigs))
+    .filter(r => canViewConfigRow(r, actor))
   if (serviceType) rows = rows.filter(r => r.serviceType === serviceType)
 
-  const parsed = rows.map(withParsedFields)
+  const parsed = rows.map(r => withParsedFields(r, actor))
   return success(c, parsed)
 })
 
 // POST /ai-configs
 app.post('/', async (c) => {
+  const actor = getRequestActor()
   const body = await c.req.json()
   const ts = now()
 
@@ -144,6 +172,27 @@ app.post('/', async (c) => {
   }
   if (!isOfficialProvider(body.service_type, body.provider)) {
     return badRequest(c, '不支持的 service_type/provider')
+  }
+
+  let targetTeamId: number | null = null
+  if (actor) {
+    const wantPlatform = body.scope === 'platform' || (isSuperAdmin(actor) && body.scope !== 'team')
+    if (wantPlatform) {
+      if (!isSuperAdmin(actor)) {
+        return c.json({ code: 403, message: '仅平台超级管理员可添加全局模型配置' }, 403)
+      }
+      targetTeamId = null
+    } else {
+      if (!isTeamAdmin(actor)) {
+        return c.json({ code: 403, message: '仅团队所有者或管理员可添加团队自定义模型（BYOK）' }, 403)
+      }
+      if (String(body.provider).toLowerCase() === 'comfyui') {
+        return badRequest(c, '团队自定义模型不支持绑定本地算力节点')
+      }
+      const urlErr = validateSafeExternalBaseUrl(String(body.base_url || ''))
+      if (urlErr) return badRequest(c, urlErr)
+      targetTeamId = actor.team.id
+    }
   }
 
   let temperature: number | null = null
@@ -156,6 +205,7 @@ app.post('/', async (c) => {
   }
 
   const res = await db.insert(schema.aiServiceConfigs).values({
+    teamId: targetTeamId,
     serviceType: body.service_type,
     provider: body.provider,
     name: body.name || `${body.provider}-${body.service_type}`,
@@ -172,21 +222,49 @@ app.post('/', async (c) => {
   const [row] = await db.select().from(schema.aiServiceConfigs)
     .where(eq(schema.aiServiceConfigs.id, getInsertId(res)))
 
-  return created(c, withParsedFields(row))
+  return created(c, withParsedFields(row, actor))
 })
 
 // POST /ai-configs/test
 app.post('/test', async (c) => {
+  const actor = getRequestActor()
   const body = await c.req.json()
-  if (!body.service_type || !body.provider || !body.base_url) {
-    return badRequest(c, '需要 service_type、provider 与 base_url')
+  if (!body.service_type || !body.provider) {
+    return badRequest(c, '需要 service_type 与 provider')
   }
   if (!isOfficialProvider(body.service_type, body.provider)) {
     return badRequest(c, '不支持的 service_type/provider')
   }
 
+  let resolvedBaseUrl = String(body.base_url || '')
+  let resolvedApiKey = String(body.api_key || '')
+
+  if (body.id) {
+    const [existing] = await db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, Number(body.id)))
+    if (!existing || !canEditConfigRow(existing, actor)) {
+      return c.json({ code: 403, message: '无权测试该模型配置' }, 403)
+    }
+    if (!resolvedBaseUrl) resolvedBaseUrl = existing.baseUrl
+    if (!resolvedApiKey || resolvedApiKey === MASKED_KEY) resolvedApiKey = existing.apiKey
+  }
+
+  if (!resolvedBaseUrl) {
+    return badRequest(c, '需要 base_url')
+  }
+
+  if (actor && !isSuperAdmin(actor)) {
+    if (!isTeamAdmin(actor)) {
+      return c.json({ code: 403, message: '仅团队管理员可测试模型连通性' }, 403)
+    }
+    if (String(body.provider).toLowerCase() === 'comfyui') {
+      return badRequest(c, '团队自定义模型不支持探测本地算力节点')
+    }
+    const urlErr = validateSafeExternalBaseUrl(resolvedBaseUrl)
+    if (urlErr) return badRequest(c, urlErr)
+  }
+
   const model = Array.isArray(body.model) ? body.model[0] : body.model
-  const probe = buildProbe(body.service_type, body.provider, body.base_url, model, body.api_key)
+  const probe = buildProbe(body.service_type, body.provider, resolvedBaseUrl, model, resolvedApiKey)
   const probeUrl = redactUrl(probe.url)
 
   logTaskProgress('AIConfig', 'probe-start', {
@@ -249,23 +327,37 @@ app.post('/test', async (c) => {
 
 // GET /ai-configs/:id
 app.get('/:id', async (c) => {
+  const actor = getRequestActor()
   const id = Number(c.req.param('id'))
   const [row] = await db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, id))
-  if (!row) return notFound(c)
-  return success(c, withParsedFields(row))
+  if (!row || !canViewConfigRow(row, actor)) return notFound(c)
+  return success(c, withParsedFields(row, actor))
 })
 
 // PUT /ai-configs/:id
 app.put('/:id', async (c) => {
+  const actor = getRequestActor()
   const id = Number(c.req.param('id'))
   const body = await c.req.json()
   const [existing] = await db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, id))
-  if (!existing) return notFound(c)
+  if (!existing || !canViewConfigRow(existing, actor)) return notFound(c)
+  if (!canEditConfigRow(existing, actor)) {
+    return c.json({ code: 403, message: '无权修改该模型配置' }, 403)
+  }
 
   const serviceType = 'service_type' in body ? body.service_type : existing.serviceType
   const provider = 'provider' in body ? body.provider : existing.provider
   if (!isOfficialProvider(serviceType, provider)) {
     return badRequest(c, '不支持的 service_type/provider')
+  }
+
+  if (existing.teamId != null && actor && !isSuperAdmin(actor)) {
+    if (String(provider).toLowerCase() === 'comfyui') {
+      return badRequest(c, '团队自定义模型不支持绑定本地算力节点')
+    }
+    const nextBaseUrl = 'base_url' in body ? String(body.base_url || '') : existing.baseUrl
+    const urlErr = validateSafeExternalBaseUrl(nextBaseUrl)
+    if (urlErr) return badRequest(c, urlErr)
   }
 
   const updates: Record<string, any> = { updatedAt: now() }
@@ -274,7 +366,7 @@ app.put('/:id', async (c) => {
   if ('provider' in body) updates.provider = body.provider
   if ('name' in body) updates.name = body.name
   if ('base_url' in body) updates.baseUrl = body.base_url
-  if ('api_key' in body) updates.apiKey = body.api_key
+  if ('api_key' in body && body.api_key !== MASKED_KEY) updates.apiKey = body.api_key
   if ('model' in body) updates.model = JSON.stringify(body.model)
   if ('priority' in body) updates.priority = body.priority
   if ('is_active' in body) updates.isActive = body.is_active
@@ -299,7 +391,13 @@ app.put('/:id', async (c) => {
 
 // DELETE /ai-configs/:id
 app.delete('/:id', async (c) => {
+  const actor = getRequestActor()
   const id = Number(c.req.param('id'))
+  const [existing] = await db.select().from(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, id))
+  if (!existing || !canViewConfigRow(existing, actor)) return notFound(c)
+  if (!canEditConfigRow(existing, actor)) {
+    return c.json({ code: 403, message: '无权删除该模型配置' }, 403)
+  }
   await db.delete(schema.aiServiceConfigs).where(eq(schema.aiServiceConfigs.id, id))
   return success(c)
 })

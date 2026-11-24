@@ -5,6 +5,7 @@
 import { Hono } from 'hono'
 import { success, badRequest } from '../utils/response.js'
 import { refreshSkillWorkspaces, skillsManagerWorkspace } from '../agents/skills.js'
+import { requireSuperAdmin } from '../services/team-access.js'
 
 const app = new Hono()
 const fsm = () => skillsManagerWorkspace.filesystem!
@@ -49,7 +50,7 @@ app.get('/*', async (c) => {
 })
 
 // PUT /skills/:id?lang= — Update skill content（lang 非 zh 写语言变体；基础版变更需刷新技能缓存）
-app.put('/*', async (c) => {
+app.put('/*', requireSuperAdmin, async (c) => {
   const id = c.req.path.slice('/api/v1/skills/'.length)
   const body = await c.req.json()
   const lang = normalizeLang(c.req.query('lang') ?? body.lang)
@@ -61,7 +62,7 @@ app.put('/*', async (c) => {
 })
 
 // POST /skills — Create new skill directory
-app.post('/', async (c) => {
+app.post('/', requireSuperAdmin, async (c) => {
   const body = await c.req.json()
   const { id, description } = body
   if (!id) return badRequest(c, 'Skill id 必填')
@@ -88,7 +89,7 @@ Write your skill content here.
 })
 
 // DELETE /skills/:id — Delete skill directory
-app.delete('/*', async (c) => {
+app.delete('/*', requireSuperAdmin, async (c) => {
   const id = c.req.path.slice('/api/v1/skills/'.length)
   if (!await fsm().exists(`skills/${id}`)) return badRequest(c, '技能不存在')
   await fsm().rmdir(`skills/${id}`, { recursive: true })

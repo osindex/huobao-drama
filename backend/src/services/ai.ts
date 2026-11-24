@@ -5,11 +5,13 @@ import { db, schema } from '../db/index.js'
 import { eq } from 'drizzle-orm'
 import { logTaskProgress, logTaskWarn } from '../utils/task-logger.js'
 import { joinProviderUrl } from './adapters/url.js'
+import { getRequestActor } from './auth.js'
 
 export type ServiceType = 'text' | 'image' | 'video'
 
 export interface AIConfig {
   id?: number
+  teamId?: number | null
   provider: string
   baseUrl: string
   apiKey: string
@@ -62,12 +64,29 @@ export function getTextProviderBaseUrl(config: AIConfig) {
 const lastLoggedActiveConfigKey = new Map<string, string>()
 const lastLoggedConfigByIdKey = new Map<number, string>()
 
+function canActorUseConfigRow(row: typeof schema.aiServiceConfigs.$inferSelect): boolean {
+  const actor = getRequestActor()
+  if (!actor) return row.teamId == null
+  return row.teamId == null || row.teamId === actor.team.id
+}
+
 export async function getActiveConfig(serviceType: ServiceType): Promise<AIConfig | null> {
+  const actor = getRequestActor()
   const rows = (await db.select().from(schema.aiServiceConfigs)
     .where(eq(schema.aiServiceConfigs.serviceType, serviceType))
   )
-    .filter(r => r.isActive && isOfficialProvider(serviceType, r.provider))
-    .sort((a, b) => (b.priority || 0) - (a.priority || 0)) // 高优先级优先
+    .filter(r => r.isActive && isOfficialProvider(serviceType, r.provider) && canActorUseConfigRow(r))
+    .sort((a, b) => {
+      // 同优先级下优先使用当前团队自己的 BYOK 配置，否则按 priority 降序
+      const pDiff = (b.priority || 0) - (a.priority || 0)
+      if (pDiff !== 0) return pDiff
+      if (actor) {
+        const aOwn = a.teamId === actor.team.id ? 1 : 0
+        const bOwn = b.teamId === actor.team.id ? 1 : 0
+        if (bOwn !== aOwn) return bOwn - aOwn
+      }
+      return a.id - b.id
+    })
 
   const active = rows[0]
   if (!active) {
@@ -89,6 +108,7 @@ export async function getActiveConfig(serviceType: ServiceType): Promise<AIConfi
   }
   return {
     id: active.id,
+    teamId: active.teamId,
     provider: active.provider || '',
     baseUrl: active.baseUrl,
     apiKey: active.apiKey,
@@ -107,19 +127,34 @@ export async function getTextConfig(): Promise<AIConfig> {
  * 取某服务类型当前启用且优先级最高的官方配置 ID（创建集时自动锁定用）
  */
 export async function getActiveConfigId(serviceType: ServiceType): Promise<number | null> {
+  const actor = getRequestActor()
   const rows = (await db.select().from(schema.aiServiceConfigs)
     .where(eq(schema.aiServiceConfigs.serviceType, serviceType))
   )
-    .filter(r => r.isActive && isOfficialProvider(serviceType, r.provider))
-    .sort((a, b) => (b.priority || 0) - (a.priority || 0))
+    .filter(r => r.isActive && isOfficialProvider(serviceType, r.provider) && canActorUseConfigRow(r))
+    .sort((a, b) => {
+      const pDiff = (b.priority || 0) - (a.priority || 0)
+      if (pDiff !== 0) return pDiff
+      if (actor) {
+        const aOwn = a.teamId === actor.team.id ? 1 : 0
+        const bOwn = b.teamId === actor.team.id ? 1 : 0
+        if (bOwn !== aOwn) return bOwn - aOwn
+      }
+      return a.id - b.id
+    })
   return rows[0]?.id ?? null
 }
 
-export async function getConfigById(id: number): Promise<AIConfig | null> {
+export async function getConfigById(id: number, opts?: { internalRecovery?: boolean }): Promise<AIConfig | null> {
   const [row] = await db.select().from(schema.aiServiceConfigs)
     .where(eq(schema.aiServiceConfigs.id, id))
   if (!row || !row.isActive) {
     logTaskWarn('AIConfig', 'config-by-id-missing', { configId: id })
+    return null
+  }
+  const actor = getRequestActor()
+  if (!opts?.internalRecovery && actor && row.teamId != null && row.teamId !== actor.team.id) {
+    logTaskWarn('AIConfig', 'config-by-id-tenant-denied', { configId: id, rowTeamId: row.teamId, actorTeamId: actor.team.id })
     return null
   }
   if (!isOfficialProvider(row.serviceType as ServiceType, row.provider)) {
@@ -143,6 +178,7 @@ export async function getConfigById(id: number): Promise<AIConfig | null> {
   }
   return {
     id: row.id,
+    teamId: row.teamId,
     provider: row.provider || '',
     baseUrl: row.baseUrl,
     apiKey: row.apiKey,

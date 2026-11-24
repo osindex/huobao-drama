@@ -296,6 +296,162 @@ export const sqliteSchemaStatements = [
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
+
+  // ─── 多用户 / 多团队 / 算力计费体系 ───────────────────────────────
+  `CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    password_source TEXT NOT NULL DEFAULT 'user',
+    is_super_admin INTEGER NOT NULL DEFAULT 0,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    current_team_id INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+
+  `CREATE TABLE IF NOT EXISTS teams (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    owner_id INTEGER NOT NULL,
+    project_visibility TEXT NOT NULL DEFAULT 'team_shared',
+    credit_balance INTEGER NOT NULL DEFAULT 0,
+    frozen_credits INTEGER NOT NULL DEFAULT 0,
+    total_recharged INTEGER NOT NULL DEFAULT 0,
+    total_consumed INTEGER NOT NULL DEFAULT 0,
+    api_key_hash TEXT,
+    api_key_prefix TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_teams_owner_id ON teams (owner_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_teams_api_key_hash ON teams (api_key_hash)`,
+
+  `CREATE TABLE IF NOT EXISTS team_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    credit_limit INTEGER,
+    credit_used INTEGER NOT NULL DEFAULT 0,
+    joined_at TEXT NOT NULL,
+    UNIQUE (team_id, user_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_team_members_team_id ON team_members (team_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_team_members_user_id ON team_members (user_id)`,
+
+  `CREATE TABLE IF NOT EXISTS drama_shares (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    drama_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    permission TEXT NOT NULL DEFAULT 'edit',
+    created_at TEXT NOT NULL,
+    UNIQUE (drama_id, user_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_drama_shares_drama_id ON drama_shares (drama_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_drama_shares_user_id ON drama_shares (user_id)`,
+
+  `CREATE TABLE IF NOT EXISTS team_invitations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL,
+    code TEXT NOT NULL UNIQUE,
+    role TEXT NOT NULL DEFAULT 'member',
+    credit_limit INTEGER,
+    max_uses INTEGER NOT NULL DEFAULT 10,
+    used_count INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_by INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_team_invitations_team_id ON team_invitations (team_id)`,
+
+  `CREATE TABLE IF NOT EXISTS user_sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    active_team_id INTEGER,
+    expires_at INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions (user_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at ON user_sessions (expires_at)`,
+
+  `CREATE TABLE IF NOT EXISTS credit_pricing (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    service_type TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT '*',
+    model_pattern TEXT NOT NULL DEFAULT '*',
+    billing_unit TEXT NOT NULL,
+    unit_credits INTEGER NOT NULL,
+    resolution_multiplier_json TEXT,
+    description TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+  )`,
+
+  `CREATE TABLE IF NOT EXISTS credit_packages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    credits INTEGER NOT NULL,
+    bonus_credits INTEGER NOT NULL DEFAULT 0,
+    price_cents INTEGER NOT NULL,
+    currency TEXT NOT NULL DEFAULT 'CNY',
+    description TEXT,
+    sort_order INTEGER DEFAULT 0,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+
+  `CREATE TABLE IF NOT EXISTS redeem_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,
+    credits INTEGER NOT NULL,
+    batch_note TEXT,
+    status TEXT NOT NULL DEFAULT 'unused',
+    redeemed_by_team_id INTEGER,
+    redeemed_by_user_id INTEGER,
+    redeemed_at TEXT,
+    expires_at TEXT,
+    created_by INTEGER,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_redeem_codes_status ON redeem_codes (status)`,
+
+  `CREATE TABLE IF NOT EXISTS recharge_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_no TEXT NOT NULL UNIQUE,
+    team_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    package_id INTEGER,
+    credits INTEGER NOT NULL,
+    amount_cents INTEGER NOT NULL DEFAULT 0,
+    payment_channel TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    external_trade_no TEXT,
+    note TEXT,
+    paid_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_recharge_orders_team_id ON recharge_orders (team_id)`,
+
+  `CREATE TABLE IF NOT EXISTS credit_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL,
+    user_id INTEGER,
+    type TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    balance_after INTEGER NOT NULL,
+    task_id INTEGER,
+    order_id INTEGER,
+    description TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_credit_ledger_team_id ON credit_ledger (team_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_credit_ledger_task_id ON credit_ledger (task_id)`,
 ]
 
 /**
@@ -376,26 +532,77 @@ const UPGRADE_SQL = 'UPDATE style_presets SET "name" = ?, "prompt" = ?, "descrip
 // 内容寻址下架：命中下架种子原文才删除
 const REMOVE_SQL = 'DELETE FROM style_presets WHERE "value" = ? AND "prompt" = ?'
 
+export const creditPricingSeeds = [
+  { serviceType: 'text', provider: '*', modelPattern: '*', billingUnit: 'per_call', unitCredits: 2, resolutionMultiplierJson: null, description: '文本模型调用（剧本改写 / 资产提取 / 分镜拆解 / 提示词）' },
+  { serviceType: 'image', provider: 'comfyui', modelPattern: '*', billingUnit: 'per_image', unitCredits: 5, resolutionMultiplierJson: null, description: '本地算力 · 图片生成' },
+  { serviceType: 'image', provider: '*', modelPattern: '*', billingUnit: 'per_image', unitCredits: 10, resolutionMultiplierJson: null, description: '云端模型 · 高清图片生成' },
+  { serviceType: 'video', provider: 'comfyui', modelPattern: '*', billingUnit: 'per_second', unitCredits: 8, resolutionMultiplierJson: '{"480p":0.8,"720p":1,"1080p":1.5}', description: '本地算力 · 视频生成（按秒计费）' },
+  { serviceType: 'video', provider: 'grok', modelPattern: '*', billingUnit: 'per_second', unitCredits: 15, resolutionMultiplierJson: '{"480p":0.8,"720p":1,"1080p":1.5}', description: 'Grok 视频生成（按秒计费）' },
+  { serviceType: 'video', provider: 'nihapi', modelPattern: '*', billingUnit: 'per_second', unitCredits: 15, resolutionMultiplierJson: '{"480p":0.8,"720p":1,"1080p":1.5}', description: '商业大模型视频生成（MiniMax / Kling / Wan / Seedance 按秒）' },
+  { serviceType: 'video', provider: '*', modelPattern: '*', billingUnit: 'per_second', unitCredits: 15, resolutionMultiplierJson: '{"480p":0.8,"720p":1,"1080p":1.5}', description: '通用云端视频生成（按秒计费）' },
+]
+
+export const creditPackageSeeds = [
+  { name: '体验算力包', credits: 1000, bonusCredits: 0, priceCents: 990, description: '适合个人轻量试玩，约可生成 100 张图或 13 段视频', sortOrder: 1 },
+  { name: '标准创作包', credits: 5000, bonusCredits: 500, priceCents: 4900, description: '独立创作者推荐，额外赠送 500 算力点', sortOrder: 2 },
+  { name: '团队专业包', credits: 20000, bonusCredits: 3000, priceCents: 19900, description: '小型短剧团队主力套餐，额外赠送 3,000 算力点', sortOrder: 3 },
+  { name: '工作室旗舰包', credits: 100000, bonusCredits: 20000, priceCents: 89900, description: '批量量产工作室专享，额外赠送 20,000 算力点', sortOrder: 4 },
+]
+
+function ensureColumns(sqlite: Database.Database, table: string, defs: Record<string, string>) {
+  const existing = new Set((sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name))
+  for (const [name, ddl] of Object.entries(defs)) {
+    if (!existing.has(name)) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${ddl}`)
+  }
+}
+
 export function initSqliteSchema(sqlite: Database.Database) {
   for (const statement of sqliteSchemaStatements) {
     sqlite.exec(statement)
   }
-  // 兼容已安装的桌面版；仅增加任务恢复元数据，不改写历史生成结果。
-  const taskColumns = new Set((sqlite.prepare('PRAGMA table_info(sys_task)').all() as { name: string }[]).map(c => c.name))
-  for (const [name, type] of Object.entries({ config_id: 'INTEGER', config_base_url: 'TEXT', stage: 'TEXT', error_code: 'TEXT' })) {
-    if (!taskColumns.has(name)) sqlite.exec(`ALTER TABLE sys_task ADD COLUMN ${name} ${type}`)
-  }
+  // 兼容已安装的桌面版与存量库；仅增加扩展元数据，不改写历史生成结果。
+  ensureColumns(sqlite, 'sys_task', {
+    config_id: 'INTEGER',
+    config_base_url: 'TEXT',
+    stage: 'TEXT',
+    error_code: 'TEXT',
+    team_id: 'INTEGER',
+    user_id: 'INTEGER',
+    frozen_credits: 'INTEGER DEFAULT 0',
+    settled_credits: 'INTEGER DEFAULT 0',
+    billing_status: "TEXT DEFAULT 'none'",
+  })
+  ensureColumns(sqlite, 'dramas', {
+    team_id: 'INTEGER',
+    created_by: 'INTEGER',
+    visibility: 'TEXT',
+  })
+  ensureColumns(sqlite, 'ai_service_configs', {
+    team_id: 'INTEGER',
+  })
+  ensureColumns(sqlite, 'video_merges', {
+    team_id: 'INTEGER',
+    created_by: 'INTEGER',
+  })
+  ensureColumns(sqlite, 'assets', {
+    team_id: 'INTEGER',
+    created_by: 'INTEGER',
+  })
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_dramas_team_id ON dramas (team_id)')
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_sys_task_team_id ON sys_task (team_id)')
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_ai_service_configs_team_id ON ai_service_configs (team_id)')
+
   // 角色音色由用户上传；旧库补充可空字段，不修改已有角色和图片。
-  const characterColumns = new Set((sqlite.prepare('PRAGMA table_info(characters)').all() as { name: string }[]).map(c => c.name))
-  for (const name of ['voice_audio_url', 'voice_audio_name']) {
-    if (!characterColumns.has(name)) sqlite.exec(`ALTER TABLE characters ADD COLUMN ${name} TEXT`)
-  }
+  ensureColumns(sqlite, 'characters', {
+    voice_audio_url: 'TEXT',
+    voice_audio_name: 'TEXT',
+  })
   const insertSeed = sqlite.prepare(SEED_SQL)
   for (const table of ['characters', 'scenes', 'props']) {
-    const columns = new Set((sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name))
-    for (const [name, type] of Object.entries({ reference_asset_id: 'INTEGER', reference_note: 'TEXT' })) {
-      if (!columns.has(name)) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`)
-    }
+    ensureColumns(sqlite, table, {
+      reference_asset_id: 'INTEGER',
+      reference_note: 'TEXT',
+    })
   }
   const upgradeSeed = sqlite.prepare(UPGRADE_SQL)
   const removeSeed = sqlite.prepare(REMOVE_SQL)
@@ -412,4 +619,73 @@ export function initSqliteSchema(sqlite: Database.Database) {
     const res = removeSeed.run(value, prompt)
     if (res.changes > 0) console.log(`🗑️ 风格预设「${value}」已下架`)
   }
+
+  const ts = new Date().toISOString()
+  // 初始化默认注册与计费开关（仅缺失时写入，不覆盖管理员在线修改）
+  const insertSetting = sqlite.prepare('INSERT OR IGNORE INTO app_settings ("key", "value", "updated_at") VALUES (?, ?, ?)')
+  insertSetting.run('auth.allow_open_register', 'true', ts)
+  insertSetting.run('auth.allow_invite_register', 'true', ts)
+  insertSetting.run('auth.register_bonus_credits', '200', ts)
+  insertSetting.run('billing.enabled', 'true', ts)
+
+  // 初始化默认计费规则与套餐（仅空表时种入）
+  const pricingCount = (sqlite.prepare('SELECT COUNT(*) AS c FROM credit_pricing').get() as { c: number }).c
+  if (pricingCount === 0) {
+    const insPricing = sqlite.prepare(
+      'INSERT INTO credit_pricing (service_type, provider, model_pattern, billing_unit, unit_credits, resolution_multiplier_json, description, is_active, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)'
+    )
+    for (const p of creditPricingSeeds) {
+      insPricing.run(p.serviceType, p.provider, p.modelPattern, p.billingUnit, p.unitCredits, p.resolutionMultiplierJson, p.description, ts)
+    }
+  }
+
+  const pkgCount = (sqlite.prepare('SELECT COUNT(*) AS c FROM credit_packages').get() as { c: number }).c
+  if (pkgCount === 0) {
+    const insPkg = sqlite.prepare(
+      'INSERT INTO credit_packages (name, credits, bonus_credits, price_cents, currency, description, sort_order, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, \'CNY\', ?, ?, 1, ?, ?)'
+    )
+    for (const pkg of creditPackageSeeds) {
+      insPkg.run(pkg.name, pkg.credits, pkg.bonusCredits, pkg.priceCents, pkg.description, pkg.sortOrder, ts, ts)
+    }
+  }
+
+  // 初始化默认超管账号与默认工作空间，并将存量单用户数据平滑归入默认团队
+  sqlite.transaction(() => {
+    let admin = sqlite.prepare('SELECT id, current_team_id FROM users WHERE is_super_admin = 1 ORDER BY id ASC LIMIT 1').get() as { id: number; current_team_id: number | null } | undefined
+    if (!admin) {
+      const res = sqlite.prepare(
+        'INSERT INTO users (username, display_name, password_hash, password_source, is_super_admin, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1, ?, ?)'
+      ).run('admin', '系统管理员', 'env-managed', 'env', ts, ts)
+      admin = { id: Number(res.lastInsertRowid), current_team_id: null }
+    }
+
+    let defaultTeam = sqlite.prepare('SELECT id FROM teams ORDER BY id ASC LIMIT 1').get() as { id: number } | undefined
+    if (!defaultTeam) {
+      const initialCredits = 100000
+      const res = sqlite.prepare(
+        'INSERT INTO teams (name, description, owner_id, project_visibility, credit_balance, frozen_credits, total_recharged, total_consumed, created_at, updated_at) VALUES (?, ?, ?, \'team_shared\', ?, 0, ?, 0, ?, ?)'
+      ).run('默认工作空间', '系统初始化默认团队空间', admin.id, initialCredits, initialCredits, ts, ts)
+      defaultTeam = { id: Number(res.lastInsertRowid) }
+      sqlite.prepare(
+        'INSERT OR IGNORE INTO team_members (team_id, user_id, role, joined_at) VALUES (?, ?, \'owner\', ?)'
+      ).run(defaultTeam.id, admin.id, ts)
+      sqlite.prepare(
+        'INSERT INTO credit_ledger (team_id, user_id, type, amount, balance_after, description, created_at) VALUES (?, ?, \'recharge\', ?, ?, ?, ?)'
+      ).run(defaultTeam.id, admin.id, initialCredits, initialCredits, '系统初始化默认团队赠送算力', ts)
+    } else {
+      sqlite.prepare(
+        'INSERT OR IGNORE INTO team_members (team_id, user_id, role, joined_at) VALUES (?, ?, \'owner\', ?)'
+      ).run(defaultTeam.id, admin.id, ts)
+    }
+
+    if (!admin.current_team_id) {
+      sqlite.prepare('UPDATE users SET current_team_id = ? WHERE id = ?').run(defaultTeam.id, admin.id)
+    }
+
+    // 存量无归属数据平滑迁移至默认团队与管理员名下
+    sqlite.prepare('UPDATE dramas SET team_id = ?, created_by = coalesce(created_by, ?) WHERE team_id IS NULL').run(defaultTeam.id, admin.id)
+    sqlite.prepare('UPDATE assets SET team_id = ?, created_by = coalesce(created_by, ?) WHERE team_id IS NULL').run(defaultTeam.id, admin.id)
+    sqlite.prepare('UPDATE video_merges SET team_id = ?, created_by = coalesce(created_by, ?) WHERE team_id IS NULL').run(defaultTeam.id, admin.id)
+    sqlite.prepare('UPDATE sys_task SET team_id = ?, user_id = coalesce(user_id, ?) WHERE team_id IS NULL').run(defaultTeam.id, admin.id)
+  })()
 }

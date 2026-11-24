@@ -3,6 +3,8 @@
  */
 import { Hono } from 'hono'
 import { getContentLanguage, setContentLanguage, getToursSeen, setToursSeen, CONTENT_LANGUAGES, type ContentLanguage } from '../services/app-settings.js'
+import { getRequestActor } from '../services/auth.js'
+import { requireSuperAdmin } from '../services/team-access.js'
 import { success, badRequest } from '../utils/response.js'
 
 const app = new Hono()
@@ -12,8 +14,8 @@ app.get('/content-language', async (c) => {
   return success(c, { language: await getContentLanguage() })
 })
 
-// PUT /content-language — 设置 AI 内容语言（body: { language: 'zh'|'en'|'ja'|'ko' }）
-app.put('/content-language', async (c) => {
+// PUT /content-language — 设置全局 AI 内容语言（仅超级管理员）
+app.put('/content-language', requireSuperAdmin, async (c) => {
   const body = await c.req.json().catch(() => null)
   const language = body?.language
   if (!(CONTENT_LANGUAGES as readonly string[]).includes(language)) {
@@ -25,16 +27,18 @@ app.put('/content-language', async (c) => {
 
 // GET /tours-seen — 已看过的引导漫游 id 列表
 app.get('/tours-seen', async (c) => {
-  return success(c, { seen: await getToursSeen() })
+  const actor = getRequestActor()
+  return success(c, { seen: await getToursSeen(actor?.user.id) })
 })
 
 // PUT /tours-seen — 写入已看过的引导漫游 id 列表（body: { seen: string[] }）
 app.put('/tours-seen', async (c) => {
+  const actor = getRequestActor()
   const body = await c.req.json().catch(() => null)
   if (!Array.isArray(body?.seen) || !body.seen.every((v: unknown) => typeof v === 'string')) {
     return badRequest(c, 'seen 必须是字符串数组')
   }
-  return success(c, { seen: await setToursSeen(body.seen) })
+  return success(c, { seen: await setToursSeen(body.seen, actor?.user.id) })
 })
 
 export default app

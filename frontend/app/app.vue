@@ -14,9 +14,11 @@ import MigrateOverlay from '~/components/MigrateOverlay.vue'
 import { useDesktopBridge } from '~/composables/useDesktopBridge'
 import { useMigrateState } from '~/composables/useMigrateState'
 import { useTheme } from '~/composables/useTheme'
+import { useAuthState } from '~/composables/useAuthState'
 
 const { t } = useI18n()
 const { resolvedTheme } = useTheme()
+const { refreshAuth } = useAuthState()
 
 // 响应式文档标题（nuxt.config.ts 的静态 title 仅作 SSR/兜底）
 useHead(() => ({ title: t('app.title') }))
@@ -25,6 +27,7 @@ const bridge = useDesktopBridge()
 const { state, begin, update, end } = useMigrateState()
 
 onMounted(() => {
+  refreshAuth()
   if (!bridge) return
   bridge.onMigrateProgress((p) => {
     if (p.phase === 'done') {
