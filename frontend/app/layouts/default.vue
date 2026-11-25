@@ -76,16 +76,6 @@
           <span class="wallet-pill-unit">点</span>
         </button>
 
-        <a
-          class="github-link"
-          href="https://github.com/chatfire-AI/huobao-drama"
-          target="_blank"
-          rel="noopener"
-          aria-label="GitHub"
-          title="GitHub"
-        >
-          <Github :size="15" :stroke-width="1.8" />
-        </a>
         <ThemeToggle />
         <LocaleSwitcher />
         <template v-if="authState.enabled">
@@ -111,7 +101,7 @@
 </template>
 
 <script setup>
-import { LayoutGrid, Settings, TriangleAlert, Github, Users, Coins, ChevronDown, Shield } from 'lucide-vue-next'
+import { LayoutGrid, Settings, TriangleAlert, Users, Coins, ChevronDown, Shield } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import { toastError } from '~/composables/useToast'
 import { useI18n } from 'vue-i18n'
@@ -335,22 +325,6 @@ watch(locale, checkAiConfigs)
   font: 600 12px/1 var(--font-body); cursor: pointer;
 }
 .logout-btn:hover { background: var(--bg-hover); color: var(--text-0); }
-.github-link {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-pill);
-  color: var(--text-2);
-  transition: all 0.18s var(--ease-out);
-  line-height: 1;
-}
-.github-link:hover { color: var(--text-0); background: var(--bg-hover); }
-.github-link:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3.5px var(--button-focus);
-}
 .nav-link {
   display: flex; align-items: center; gap: 6px;
   min-height: 32px;
