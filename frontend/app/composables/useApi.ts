@@ -115,12 +115,16 @@ export const episodeAPI = {
   extractStatus: (id: number) => api.get(`/episodes/${id}/extract-status`),
   generateVideoPrompts: (id: number, model?: string, configId?: number, storyboardIds?: number[]) => api.post(`/episodes/${id}/generate-video-prompts`, { model: model || undefined, config_id: configId || undefined, storyboard_ids: storyboardIds?.length ? storyboardIds : undefined }),
   videoPromptsStatus: (id: number) => api.get(`/episodes/${id}/video-prompts-status`),
+  getCanvas: (id: number) => api.get<{ episode_id: number; viewport: any; nodes: Record<string, any>; connections: any[]; updated_at: string | null }>(`/episodes/${id}/canvas`),
+  saveCanvas: (id: number, data: { viewport?: any; nodes?: Record<string, any>; connections?: any[] }) => api.put(`/episodes/${id}/canvas`, data),
 }
 
 export const storyboardAPI = {
   create: (data: any) => api.post('/storyboards', data),
   update: (id: number, data: any) => api.put(`/storyboards/${id}`, data),
   del: (id: number) => api.del(`/storyboards/${id}`),
+  extractFrame: (id: number, data?: { position?: 'first' | 'last' | 'timestamp'; timestamp?: number; source_video_url?: string; apply_to?: 'first_frame' | 'last_frame' | 'next_first_frame' | 'none'; target_storyboard_id?: number }) =>
+    api.post<{ path: string; url: string; updated_storyboard_id: number | null; updated_field: string | null }>(`/storyboards/${id}/extract-frame`, data || {}),
 }
 
 export const characterAPI = {
@@ -129,6 +133,8 @@ export const characterAPI = {
   create: (data: any) => api.post('/characters', data),
   update: (id: number, data: any) => api.put(`/characters/${id}`, data),
   del: (id: number) => api.del(`/characters/${id}`),
+  getReference: (id: number) => api.get(`/characters/${id}/reference`),
+  setReference: (id: number, data: { reference_asset_id: number | null; reference_note: string }) => api.put(`/characters/${id}/reference`, data),
   generatePrompt: (id: number, episodeId: number, force = false, textModel?: string, textConfigId?: number) => api.post(`/characters/${id}/generate-prompt`, { episode_id: episodeId, force, text_model: textModel || undefined, text_config_id: textConfigId || undefined }),
   generateImage: (id: number, episodeId: number, model?: string, configId?: number, textModel?: string, textConfigId?: number) => api.post(`/characters/${id}/generate-image`, { episode_id: episodeId, model: model || undefined, config_id: configId || undefined, text_model: textModel || undefined, text_config_id: textConfigId || undefined }),
   batchImages: (ids: number[], episodeId: number, model?: string, configId?: number, textModel?: string, textConfigId?: number) => api.post('/characters/batch-generate-images', { character_ids: ids, episode_id: episodeId, model: model || undefined, config_id: configId || undefined, text_model: textModel || undefined, text_config_id: textConfigId || undefined }),
@@ -143,6 +149,8 @@ export const sceneAPI = {
   create: (data: any) => api.post('/scenes', data),
   update: (id: number, data: any) => api.put(`/scenes/${id}`, data),
   del: (id: number) => api.del(`/scenes/${id}`),
+  getReference: (id: number) => api.get(`/scenes/${id}/reference`),
+  setReference: (id: number, data: { reference_asset_id: number | null; reference_note: string }) => api.put(`/scenes/${id}/reference`, data),
   generatePrompt: (id: number, episodeId: number, force = false, textModel?: string, textConfigId?: number) => api.post(`/scenes/${id}/generate-prompt`, { episode_id: episodeId, force, text_model: textModel || undefined, text_config_id: textConfigId || undefined }),
   generateImage: (id: number, episodeId: number, model?: string, configId?: number, textModel?: string, textConfigId?: number) => api.post(`/scenes/${id}/generate-image`, { episode_id: episodeId, model: model || undefined, config_id: configId || undefined, text_model: textModel || undefined, text_config_id: textConfigId || undefined }),
 }
@@ -151,6 +159,8 @@ export const propAPI = {
   create: (data: any) => api.post('/props', data),
   update: (id: number, data: any) => api.put(`/props/${id}`, data),
   del: (id: number) => api.del(`/props/${id}`),
+  getReference: (id: number) => api.get(`/props/${id}/reference`),
+  setReference: (id: number, data: { reference_asset_id: number | null; reference_note: string }) => api.put(`/props/${id}/reference`, data),
   generatePrompt: (id: number, episodeId: number, force = false, textModel?: string, textConfigId?: number) => api.post(`/props/${id}/generate-prompt`, { episode_id: episodeId, force, text_model: textModel || undefined, text_config_id: textConfigId || undefined }),
   generateImage: (id: number, episodeId: number, model?: string, configId?: number, textModel?: string, textConfigId?: number) => api.post(`/props/${id}/generate-image`, { episode_id: episodeId, model: model || undefined, config_id: configId || undefined, text_model: textModel || undefined, text_config_id: textConfigId || undefined }),
 }

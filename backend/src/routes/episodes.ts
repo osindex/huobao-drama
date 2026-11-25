@@ -303,7 +303,7 @@ app.get('/:id/pipeline-status', async (c) => {
   const sbs = await db.select().from(schema.storyboards).where(eq(schema.storyboards.episodeId, episodeId))
   const merges = await db.select().from(schema.videoMerges).where(eq(schema.videoMerges.episodeId, episodeId))
 
-  const sbsWithImage = sbs.filter(s => s.composedImage)
+  const sbsWithImage = sbs.filter(s => s.composedImage || s.firstFrameImage || s.lastFrameImage)
   const sbsWithVideo = sbs.filter(s => s.videoUrl)
   const latestMerge = merges[merges.length - 1]
 
@@ -325,6 +325,74 @@ app.get('/:id/pipeline-status', async (c) => {
       merge_episode: { status: latestMerge?.status === 'completed' ? 'done' : (latestMerge ? latestMerge.status : 'pending'), merged_url: latestMerge?.mergedUrl },
     },
   })
+})
+
+function safeParseJson<T>(raw: string | null | undefined, fallback: T): T {
+  if (!raw) return fallback
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return fallback
+  }
+}
+
+// GET /episodes/:id/canvas — 读取导演画布空间布局与便签/连线状态
+app.get('/:id/canvas', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const access = checkEpisodeIdAccess(episodeId, 'read')
+  if (!access.ok) return respondAccessDenied(c, access)
+
+  const [row] = await db.select().from(schema.episodeCanvasStates)
+    .where(eq(schema.episodeCanvasStates.episodeId, episodeId))
+
+  return success(c, {
+    episode_id: episodeId,
+    viewport: safeParseJson(row?.viewportJson, null),
+    nodes: safeParseJson<Record<string, any>>(row?.nodesJson, {}),
+    connections: safeParseJson<any[]>(row?.connectionsJson, []),
+    updated_at: row?.updatedAt || null,
+  })
+})
+
+// PUT /episodes/:id/canvas — 保存导演画布空间布局与便签/连线状态
+app.put('/:id/canvas', async (c) => {
+  const episodeId = Number(c.req.param('id'))
+  const access = checkEpisodeIdAccess(episodeId, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+
+  const body = await c.req.json().catch(() => null)
+  if (!body || typeof body !== 'object') return badRequest(c, '无效的画布状态数据')
+
+  const viewportJson = body.viewport !== undefined ? JSON.stringify(body.viewport) : undefined
+  const nodesJson = body.nodes !== undefined ? JSON.stringify(body.nodes) : undefined
+  const connectionsJson = body.connections !== undefined ? JSON.stringify(body.connections) : undefined
+
+  const totalBytes = (viewportJson?.length || 0) + (nodesJson?.length || 0) + (connectionsJson?.length || 0)
+  if (totalBytes > 512 * 1024) return badRequest(c, '画布布局数据过大（上限 512KB）')
+
+  const ts = now()
+  const [existing] = await db.select().from(schema.episodeCanvasStates)
+    .where(eq(schema.episodeCanvasStates.episodeId, episodeId))
+
+  if (existing) {
+    const patch: Record<string, any> = { updatedAt: ts }
+    if (viewportJson !== undefined) patch.viewportJson = viewportJson
+    if (nodesJson !== undefined) patch.nodesJson = nodesJson
+    if (connectionsJson !== undefined) patch.connectionsJson = connectionsJson
+    await db.update(schema.episodeCanvasStates)
+      .set(patch)
+      .where(eq(schema.episodeCanvasStates.episodeId, episodeId))
+  } else {
+    await db.insert(schema.episodeCanvasStates).values({
+      episodeId,
+      viewportJson: viewportJson ?? null,
+      nodesJson: nodesJson ?? '{}',
+      connectionsJson: connectionsJson ?? '[]',
+      updatedAt: ts,
+    })
+  }
+
+  return success(c, { episode_id: episodeId, updated_at: ts })
 })
 
 export default app

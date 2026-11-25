@@ -119,7 +119,7 @@ export async function generateImage(params: GenerateImageParams): Promise<number
     frameType: params.frameType,
     referenceImages: reference?.referenceImages || params.referenceImages,
     referenceAsset: reference?.referenceAsset,
-    requireReferenceImages: !!reference,
+    requireReferenceImages: !!reference || Boolean(params.referenceImages?.length),
   }, {
     skipBilling: params.skipBilling,
     internalTeamId: params.internalTeamId,
@@ -345,6 +345,9 @@ async function processTask(id: number, config: AIConfig) {
         params.firstFrameUrl = firstFrame
         params.referenceImageUrls = []
         await db.update(schema.sysTask).set({ params: JSON.stringify(params) }).where(eq(schema.sysTask.id, id))
+      } else if (config.provider === 'comfyui' && (params.firstFrameUrl || params.imageUrl)) {
+        // 已在画布/工作台显式指定首帧时，本地 Wan 2.2 直接走单首帧图生视频，不再触发盲盒二次合成
+        params.referenceImageUrls = []
       }
       const normalizeImage = config.provider === 'nihapi'
         ? async (value: string | null | undefined) => {

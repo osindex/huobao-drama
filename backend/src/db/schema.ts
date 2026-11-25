@@ -454,3 +454,11 @@ export const creditLedger = sqliteTable('credit_ledger', {
   description: text('description').notNull(),
   createdAt: text('created_at').notNull(),
 })
+
+export const episodeCanvasStates = sqliteTable('episode_canvas_states', {
+  episodeId: integer('episode_id').primaryKey(),
+  viewportJson: text('viewport_json'),
+  nodesJson: text('nodes_json'),
+  connectionsJson: text('connections_json'),
+  updatedAt: text('updated_at').notNull(),
+})

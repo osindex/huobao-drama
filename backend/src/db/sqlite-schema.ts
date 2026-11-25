@@ -452,6 +452,14 @@ export const sqliteSchemaStatements = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_credit_ledger_team_id ON credit_ledger (team_id)`,
   `CREATE INDEX IF NOT EXISTS idx_credit_ledger_task_id ON credit_ledger (task_id)`,
+
+  `CREATE TABLE IF NOT EXISTS episode_canvas_states (
+    episode_id INTEGER PRIMARY KEY,
+    viewport_json TEXT,
+    nodes_json TEXT,
+    connections_json TEXT,
+    updated_at TEXT NOT NULL
+  )`,
 ]
 
 /**

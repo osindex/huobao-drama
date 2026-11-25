@@ -489,6 +489,26 @@
               <span class="dim" style="font-size:12px">{{ t('episode.prod.videos') }}</span>
               <span class="tag mono">{{ t('episode.sb.segmentStat', { n: sbs.length, dur: totalDuration }) }}</span>
               <span class="tag mono" :title="t('episode.vid.aspectRatio')">{{ dramaAspectRatio }}</span>
+              <div class="view-mode-switch" role="tablist" aria-label="分镜创作视图">
+                <button
+                  type="button"
+                  role="tab"
+                  class="view-mode-tab"
+                  :class="{ on: videoViewMode === 'pipeline' }"
+                  @click="setVideoViewMode('pipeline')"
+                >
+                  ☰ 流水线
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  class="view-mode-tab"
+                  :class="{ on: videoViewMode === 'canvas' }"
+                  @click="setVideoViewMode('canvas')"
+                >
+                  ❖ 导演画布
+                </button>
+              </div>
               <div class="ml-auto flex gap-1">
                 <button class="btn btn-sm" :disabled="rn" @click="doBreakdown">
                   <Loader2 v-if="rt === 'storyboard_breaker'" :size="11" class="animate-spin" />
@@ -504,7 +524,7 @@
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
                   {{ t('episode.recovery.restoreFailed', { n: recoverableVideoCount }) }}
                 </button>
-                <button class="btn btn-sm" :class="{ 'is-on': videoSelectMode }" @click="toggleVideoSelectMode">
+                <button v-if="videoViewMode === 'pipeline'" class="btn btn-sm" :class="{ 'is-on': videoSelectMode }" @click="toggleVideoSelectMode">
                   {{ videoSelectMode ? t('episode.vid.selectDone', { n: selectedVideoSbIds.length }) : t('episode.vid.select') }}
                 </button>
                 <button class="btn btn-sm" :disabled="!sbs.length" @click="batchVideos">
@@ -525,6 +545,152 @@
                 <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
                 {{ t('episode.sb.startBreak') }}
               </button>
+            </div>
+            <div v-else-if="videoViewMode === 'canvas'" class="canvas-workbench-wrap">
+              <DirectorCanvas
+                :episode-id="epId"
+                :drama-id="dramaId"
+                :aspect-ratio="dramaAspectRatio"
+                :storyboards="sbs"
+                :selected-sb-id="selectedSb?.id || null"
+                :scenes="scenes"
+                :characters="visualChars"
+                :props-list="propItems"
+                :gen-tasks="genTasks"
+                :pending-video-ids="pendingVideoIds"
+                :pending-keyframe-keys="pendingKeyframeKeys"
+                :batching-keyframes="batchingKeyframes"
+                :failed-video-messages="failedVideoMessages"
+                :video-provider="selectedVideoConfig?.provider"
+                :video-model="bareModelName(videoModel) || effectiveVideoModelLabel"
+                :video-resolution="episodeResolution"
+                @select="sb => { selectedSb = sb }"
+                @open-inspector="sb => { selectedSb = sb; canvasInspectorOpen = true }"
+                @open-collage="openCollageModal"
+                @generate-keyframe="generateShotKeyframe"
+                @upload-keyframe="uploadShotKeyframe"
+                @clear-keyframe="clearShotKeyframe"
+                @relay-tail-to-next="relayTailFrame"
+                @extract-self-last-frame="extractSelfLastFrame"
+                @generate-video="sb => genVid(sb)"
+                @stop-video="sb => stopVideo(sb)"
+                @batch-first-frames="batchGenerateFirstFrames"
+                @preview-image="p => openImageViewer(p.src, p.title)"
+                @refresh="refresh"
+              />
+
+              <!-- Slide-over Shot Inspector Drawer in Canvas Mode -->
+              <div v-if="canvasInspectorOpen && selectedSb" class="task-drawer-overlay" @click.self="canvasInspectorOpen = false">
+                <aside class="task-drawer canvas-shot-drawer">
+                  <header class="task-drawer-head">
+                    <div>
+                      <div class="video-inspector-title">
+                        镜头 #{{ String(selectedVideoTaskNumber).padStart(2, '0') }} · 分镜与提示词编辑
+                      </div>
+                      <div class="video-inspector-sub">修改自动同步至导演画布与流水线视图</div>
+                    </div>
+                    <button type="button" class="btn btn-icon btn-sm" @click="canvasInspectorOpen = false">✕</button>
+                  </header>
+                  <div class="task-drawer-body canvas-drawer-scroll">
+                    <div class="canvas-drawer-grid">
+                      <label class="field">
+                        <span class="field-label">镜头标题</span>
+                        <input :value="selectedSb.title || ''" class="input" @blur="updateField(selectedSb, 'title', $event.target.value)" />
+                      </label>
+                      <label class="field">
+                        <span class="field-label">时长 (秒)</span>
+                        <input :value="selectedSb.duration || 5" type="number" min="2" max="30" class="input" @change="onVideoDurationChange" />
+                      </label>
+                      <label class="field">
+                        <span class="field-label">景别</span>
+                        <input :value="selectedSb.shot_type || selectedSb.shotType || ''" class="input" placeholder="特写 / 中景 / 全景" @blur="updateField(selectedSb, 'shot_type', $event.target.value)" />
+                      </label>
+                      <label class="field">
+                        <span class="field-label">运镜方式</span>
+                        <input :value="selectedSb.movement || ''" class="input" placeholder="固定 / 缓推 / 跟拍" @blur="updateField(selectedSb, 'movement', $event.target.value)" />
+                      </label>
+                    </div>
+
+                    <label class="field">
+                      <span class="field-label">{{ t('episode.sb.descLabel') }}</span>
+                      <textarea :value="selectedSb.description || ''" class="textarea" rows="4" @blur="updateField(selectedSb, 'description', $event.target.value)" :placeholder="t('episode.sb.descPlaceholder')" />
+                    </label>
+
+                    <label class="field">
+                      <span class="field-label">{{ t('episode.sb.atmosphere') }}</span>
+                      <textarea :value="selectedSb.atmosphere || ''" class="textarea" rows="2" @blur="updateField(selectedSb, 'atmosphere', $event.target.value)" :placeholder="t('episode.sb.atmospherePlaceholder')" />
+                    </label>
+
+                    <section class="video-inspector-section">
+                      <div class="video-inspector-prompt-head">
+                        <span class="video-inspector-label">{{ t('episode.ref.title') }}</span>
+                        <span class="tag mono">{{ t('episode.ref.boundCount', { bound: refBindableAssets.filter(a => a.bound).length, total: refBindableAssets.length }) }}</span>
+                      </div>
+                      <div class="storyboard-ref-list is-embedded">
+                        <template v-for="g in REF_KINDS" :key="'cd-' + g.kind">
+                          <div v-if="refBindableAssets.filter(a => a.kind === g.kind).length" class="storyboard-ref-group">
+                            <div class="storyboard-ref-group-label">{{ g.label }}</div>
+                            <div
+                              v-for="asset in refBindableAssets.filter(a => a.kind === g.kind)"
+                              :key="asset.key"
+                              :class="['storyboard-ref-item', { bound: asset.bound }]"
+                              @click="toggleShotBind(selectedSb, asset)"
+                            >
+                              <button
+                                type="button"
+                                class="storyboard-ref-thumb"
+                                :disabled="!asset.ready"
+                                @click.stop="asset.ready && openImageViewer(assetImageSrc({ imageUrl: asset.imageUrl }), `${asset.name} ${asset.typeLabel}`)"
+                              >
+                                <img v-if="asset.ready" :src="thumbOf(assetImageSrc({ imageUrl: asset.imageUrl }))" loading="lazy" @error="thumbFallback($event, assetImageSrc({ imageUrl: asset.imageUrl }))" />
+                                <span v-else>{{ asset.kind === 'scene' ? t('episode.ref.shortScene') : asset.kind === 'prop' ? t('episode.ref.shortProp') : t('episode.ref.shortChar') }}</span>
+                              </button>
+                              <div class="storyboard-ref-main">
+                                <span class="storyboard-ref-name">{{ asset.name }}</span>
+                                <span :class="['storyboard-ref-state', asset.bound && asset.ready ? 'is-ready' : '']">
+                                  {{ asset.bound ? (asset.ready ? t('episode.ref.usable') : t('episode.ref.notReady')) : t('episode.ref.unbound') }}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </template>
+                      </div>
+                    </section>
+
+                    <section class="video-inspector-section">
+                      <div class="video-inspector-prompt-head">
+                        <span class="video-inspector-label video-inspector-label-hero">{{ t('episode.sb.videoPromptSection') }}</span>
+                        <button
+                          type="button"
+                          class="btn btn-sm"
+                          :disabled="videoPromptGeneratingIds.includes(selectedSb?.id) || videoPromptBatch.running"
+                          @click="genVideoPrompt(selectedSb)"
+                        >
+                          <Loader2 v-if="videoPromptGeneratingIds.includes(selectedSb?.id)" :size="11" class="animate-spin" />
+                          {{ (selectedSb.video_prompt || selectedSb.videoPrompt) ? t('episode.sb.regenPrompt') : t('episode.sb.aiGenerate') }}
+                        </button>
+                      </div>
+                      <MentionTextarea
+                        :model-value="selectedSb.video_prompt || selectedSb.videoPrompt || ''"
+                        :options="mentionOptions"
+                        :rows="10"
+                        input-class="textarea video-inspector-prompt"
+                        :placeholder="t('episode.inspector.videoPromptPlaceholder')"
+                        @commit="v => updateField(selectedSb, 'video_prompt', v)"
+                      />
+                    </section>
+                  </div>
+                  <footer class="video-inspector-footer">
+                    <button
+                      class="btn btn-primary video-inspector-action"
+                      :disabled="videoTaskState(selectedSb) === 'pending'"
+                      @click="genVid(selectedSb)"
+                    >
+                      {{ videoTaskActionLabel(selectedSb) }}
+                    </button>
+                  </footer>
+                </aside>
+              </div>
             </div>
             <div v-else class="video-task-workbench has-player" :style="{ '--vleft': videoLeftW + 'px', '--vright': videoRightW + 'px' }">
               <section class="video-task-list">
@@ -572,10 +738,22 @@
                       muted
                       tabindex="-1"
                     />
+                    <img
+                      v-else-if="task.storyboard.first_frame_image || task.storyboard.firstFrameImage"
+                      :src="keyframeMediaUrl(task.storyboard.first_frame_image || task.storyboard.firstFrameImage)"
+                      class="video-task-kf-thumb"
+                      loading="lazy"
+                    />
                     <div v-else class="video-task-empty">
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
                     </div>
                     <span class="video-task-index">#{{ String(task.index + 1).padStart(2, '0') }}</span>
+                    <span
+                      v-if="(task.storyboard.first_frame_image || task.storyboard.firstFrameImage) || (task.storyboard.last_frame_image || task.storyboard.lastFrameImage)"
+                      class="video-task-kf-badge"
+                    >
+                      {{ (task.storyboard.first_frame_image || task.storyboard.firstFrameImage) && (task.storyboard.last_frame_image || task.storyboard.lastFrameImage) ? '首尾' : '首帧' }}
+                    </span>
                   </div>
                   <div class="video-task-main">
                     <div class="video-task-line">
@@ -786,6 +964,98 @@
               </div>
             </div>
                 <div class="video-inspector-body">
+                  <!-- 首尾关键帧定格控制（与导演画布完全互通） -->
+                  <section class="video-inspector-section kf-inspector-card">
+                    <div class="video-inspector-prompt-head">
+                      <span class="video-inspector-label">首尾关键帧控制</span>
+                      <label class="kf-drive-toggle" :title="activeVideoKeyframeCap.shortHint">
+                        <input type="checkbox" v-model="preferKeyframesInVideo" />
+                        <span>按关键帧驱动</span>
+                      </label>
+                    </div>
+                    <div class="kf-cap-hint">{{ activeVideoKeyframeCap.label }}</div>
+
+                    <div class="kf-slots-grid">
+                      <!-- 首帧 -->
+                      <div class="kf-slot-box">
+                        <div class="kf-slot-head">
+                          <span>① 首帧</span>
+                          <button
+                            v-if="selectedVideoTaskNumber > 1"
+                            type="button"
+                            class="kf-link-btn"
+                            title="抽取上一镜结尾画面作为本镜首帧"
+                            @click="relayTailFrame({ fromStoryboard: sbs[selectedVideoTaskNumber - 2], toStoryboard: selectedSb })"
+                          >
+                            ⏮ 接上镜尾
+                          </button>
+                        </div>
+                        <div class="kf-slot-thumb">
+                          <img
+                            v-if="selectedSb.first_frame_image || selectedSb.firstFrameImage"
+                            :src="keyframeMediaUrl(selectedSb.first_frame_image || selectedSb.firstFrameImage)"
+                            @click="openImageViewer(keyframeMediaUrl(selectedSb.first_frame_image || selectedSb.firstFrameImage), `#${selectedVideoTaskNumber} 首帧`)"
+                          />
+                          <div v-else-if="isKeyframeSlotPending(selectedSb.id, 'first_frame')" class="kf-slot-empty">
+                            <Loader2 :size="13" class="animate-spin" />
+                            <span>生图中…</span>
+                          </div>
+                          <div v-else class="kf-slot-empty">未锁定首帧</div>
+                          <button
+                            v-if="selectedSb.first_frame_image || selectedSb.firstFrameImage"
+                            type="button"
+                            class="kf-slot-clear"
+                            @click="clearShotKeyframe({ storyboard: selectedSb, slot: 'first_frame' })"
+                          >×</button>
+                        </div>
+                        <div class="kf-slot-btns">
+                          <button type="button" class="kf-mini-btn is-accent" :disabled="isKeyframeSlotPending(selectedSb.id, 'first_frame')" @click="generateShotKeyframe({ storyboard: selectedSb, slot: 'first_frame' })">✨ AI</button>
+                          <button type="button" class="kf-mini-btn" @click="openCollageModal({ storyboard: selectedSb, shotNumber: selectedVideoTaskNumber, slot: 'first_frame' })">🎨 拼贴</button>
+                          <button type="button" class="kf-mini-btn" @click="uploadShotKeyframe({ storyboard: selectedSb, slot: 'first_frame' })">↑</button>
+                        </div>
+                      </div>
+
+                      <!-- 尾帧 -->
+                      <div class="kf-slot-box">
+                        <div class="kf-slot-head">
+                          <span>② 尾帧</span>
+                          <button
+                            v-if="hasVid(selectedSb)"
+                            type="button"
+                            class="kf-link-btn"
+                            title="从本镜已出视频抽取最后一帧"
+                            @click="extractSelfLastFrame(selectedSb)"
+                          >
+                            🎞 抽视频尾
+                          </button>
+                        </div>
+                        <div class="kf-slot-thumb">
+                          <img
+                            v-if="selectedSb.last_frame_image || selectedSb.lastFrameImage"
+                            :src="keyframeMediaUrl(selectedSb.last_frame_image || selectedSb.lastFrameImage)"
+                            @click="openImageViewer(keyframeMediaUrl(selectedSb.last_frame_image || selectedSb.lastFrameImage), `#${selectedVideoTaskNumber} 尾帧`)"
+                          />
+                          <div v-else-if="isKeyframeSlotPending(selectedSb.id, 'last_frame')" class="kf-slot-empty">
+                            <Loader2 :size="13" class="animate-spin" />
+                            <span>生图中…</span>
+                          </div>
+                          <div v-else class="kf-slot-empty">未锁定尾帧</div>
+                          <button
+                            v-if="selectedSb.last_frame_image || selectedSb.lastFrameImage"
+                            type="button"
+                            class="kf-slot-clear"
+                            @click="clearShotKeyframe({ storyboard: selectedSb, slot: 'last_frame' })"
+                          >×</button>
+                        </div>
+                        <div class="kf-slot-btns">
+                          <button type="button" class="kf-mini-btn is-accent" :disabled="isKeyframeSlotPending(selectedSb.id, 'last_frame')" @click="generateShotKeyframe({ storyboard: selectedSb, slot: 'last_frame' })">✨ AI</button>
+                          <button type="button" class="kf-mini-btn" @click="openCollageModal({ storyboard: selectedSb, shotNumber: selectedVideoTaskNumber, slot: 'last_frame' })">🎨 拼贴</button>
+                          <button type="button" class="kf-mini-btn" @click="uploadShotKeyframe({ storyboard: selectedSb, slot: 'last_frame' })">↑</button>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
                   <section class="video-inspector-section">
                     <div class="video-inspector-prompt-head">
                       <span class="video-inspector-label">{{ t('episode.inspector.boundRefs') }}</span>
@@ -1451,6 +1721,23 @@
         @confirm="confirmDeleteAsset"
         @cancel="assetDelete.open = false"
       />
+
+      <CollageComposerModal
+        :open="collageModal.open"
+        :storyboard="collageModal.storyboard"
+        :shot-number="collageModal.shotNumber"
+        :drama-id="dramaId"
+        :aspect-ratio="dramaAspectRatio"
+        :scenes="scenes"
+        :characters="visualChars"
+        :props-list="propItems"
+        :initial-slot="collageModal.slot"
+        :image-model="bareModelName(imageModel) || undefined"
+        :image-config-id="ownerConfigId(imageModelOptions, imageModel) || selectedImageConfig?.id"
+        :image-provider="selectedImageConfig?.provider"
+        @close="collageModal.open = false"
+        @saved="onCollageSaved"
+      />
     </main>
     </div>
   </div>
@@ -1469,6 +1756,14 @@ import { useAgent } from '~/composables/useAgent'
 import { resolveTextModelSelection } from '~/utils/text-model-selection'
 import { toastError, mapError, MODERATION_RE } from '~/composables/useToast'
 import LocaleSwitcher from '~/components/LocaleSwitcher.vue'
+import DirectorCanvas from '~/components/canvas/DirectorCanvas.vue'
+import CollageComposerModal from '~/components/canvas/CollageComposerModal.vue'
+import {
+  getVideoKeyframeCapability,
+  buildVideoKeyframePayload,
+  aspectRatioToImageSize,
+  buildStoryboardKeyframePrompt,
+} from '~/components/canvas/keyframeCapabilities'
 
 definePageMeta({ layout: 'studio' })
 
@@ -2229,6 +2524,16 @@ function hasMultiConfigs(options) {
 const textModelOptions = computed(() => collectModelOptions(textConfigs.value))
 const imageModelOptions = computed(() => collectModelOptions(imageConfigs.value))
 const videoModelOptions = computed(() => collectModelOptions(videoConfigs.value))
+const lockedImageConfigId = computed(() => episode.value?.image_config_id || episode.value?.imageConfigId || null)
+const selectedImageConfig = computed(() => {
+  const selected = imageModelOptions.value.find(option => option.key === imageModel.value)
+  if (selected) return imageConfigs.value.find(config => config.id === selected.configId)
+  const locked = imageConfigs.value.find(config => config.id === lockedImageConfigId.value && config.is_active)
+  if (locked) return locked
+  return [...imageConfigs.value]
+    .filter(config => config.is_active)
+    .sort((a, b) => (b.priority || 0) - (a.priority || 0))[0]
+})
 const selectedVideoConfig = computed(() => {
   const selected = videoModelOptions.value.find(option => option.key === videoModel.value)
   if (selected) return videoConfigs.value.find(config => config.id === selected.configId)
@@ -3318,7 +3623,25 @@ const mentionOptions = computed(() => {
 })
 
 // 按参考图顺序（场景图在前、角色图居中、道具图在后）为 @名字 建立索引映射，供视频提示词引用替换
-function getShotReferenceIndexMap(sb) {
+// 若传入 explicitRefUrls，则严格按最终实际发送的 reference_image_urls 数组位置建立 1-based 索引
+function getShotReferenceIndexMap(sb, explicitRefUrls = null) {
+  if (Array.isArray(explicitRefUrls)) {
+    const nameToIndex = {}
+    const bindByActualUrl = (name, url) => {
+      if (!name || !url || name in nameToIndex) return
+      const idx = explicitRefUrls.indexOf(url)
+      if (idx >= 0) nameToIndex[name] = idx + 1
+    }
+    const scene = getStoryboardScene(sb)
+    bindByActualUrl(scene?.location || '', scene?.image_url || scene?.imageUrl)
+    for (const char of getStoryboardCharacters(sb)) {
+      bindByActualUrl(char.name || '', char?.image_url || char?.imageUrl)
+    }
+    for (const prop of getStoryboardProps(sb)) {
+      bindByActualUrl(prop.name || '', prop?.image_url || prop?.imageUrl)
+    }
+    return nameToIndex
+  }
   const ordered = []
   const seen = new Set()
   const push = (name, url) => {
@@ -3339,10 +3662,34 @@ function getShotReferenceIndexMap(sb) {
   return nameToIndex
 }
 
+function getKnownShotAssetNames(sb) {
+  const names = []
+  const scene = getStoryboardScene(sb)
+  if (scene?.location) names.push(scene.location)
+  for (const char of getStoryboardCharacters(sb)) {
+    if (char.name) names.push(char.name)
+  }
+  for (const prop of getStoryboardProps(sb)) {
+    if (prop.name) names.push(prop.name)
+  }
+  return [...new Set(names)].sort((a, b) => b.length - a.length)
+}
+
 // 将视频提示词里的 @名字 替换为 @图片N名字（N 为参考图序号，1 起），生成时使用
-function resolveVideoPromptRefs(sb) {
+// 当纯首尾关键帧独占模式（explicitRefUrls 为空数组）时，剥离已知素材前的 @ 符号以避免悬空引用
+function resolveVideoPromptRefs(sb, explicitRefUrls = null) {
   const prompt = sb.video_prompt || sb.videoPrompt || ''
-  const map = getShotReferenceIndexMap(sb)
+  if (Array.isArray(explicitRefUrls) && explicitRefUrls.length === 0) {
+    const known = getKnownShotAssetNames(sb)
+    if (!known.length) return prompt
+    return prompt.replace(/@([^\s@#]+)/g, (m, raw) => {
+      for (const name of known) {
+        if (raw.startsWith(name)) return `${name}${raw.slice(name.length)}`
+      }
+      return m
+    })
+  }
+  const map = getShotReferenceIndexMap(sb, explicitRefUrls)
   const names = Object.keys(map).sort((a, b) => b.length - a.length)
   if (!names.length) return prompt
   return prompt.replace(/@([^\s@#]+)/g, (m, raw) => {
@@ -3407,32 +3754,320 @@ function uploadAssetImage(kind, id) {
   })
 }
 
+// ===== 导演画布 & 首尾关键帧控制（与流水线双视图共享数据源） =====
+const VIDEO_VIEW_STORE_KEY = 'huobao:workbench:video-view'
+const PREFER_KF_STORE_KEY = 'huobao:workbench:prefer-keyframes'
+const videoViewMode = ref((() => {
+  try { return localStorage.getItem(VIDEO_VIEW_STORE_KEY) === 'canvas' ? 'canvas' : 'pipeline' } catch { return 'pipeline' }
+})())
+function setVideoViewMode(mode) {
+  videoViewMode.value = mode === 'canvas' ? 'canvas' : 'pipeline'
+  if (videoViewMode.value !== 'pipeline' && videoSelectMode.value) toggleVideoSelectMode()
+  try { localStorage.setItem(VIDEO_VIEW_STORE_KEY, videoViewMode.value) } catch {}
+}
+const preferKeyframesInVideo = ref((() => {
+  try { return localStorage.getItem(PREFER_KF_STORE_KEY) !== '0' } catch { return true }
+})())
+watch(preferKeyframesInVideo, (val) => {
+  try { localStorage.setItem(PREFER_KF_STORE_KEY, val ? '1' : '0') } catch {}
+})
+const canvasInspectorOpen = ref(false)
+const pendingKeyframeKeys = ref([])
+const batchingKeyframes = ref(false)
+const collageModal = ref({ open: false, storyboard: null, shotNumber: 1, slot: 'first_frame' })
+
+const activeVideoKeyframeCap = computed(() =>
+  getVideoKeyframeCapability(
+    selectedVideoConfig.value?.provider,
+    bareModelName(videoModel.value) || effectiveVideoModelLabel.value,
+    episodeResolution.value,
+  ),
+)
+
+function keyframeMediaUrl(raw) {
+  if (!raw) return ''
+  if (/^(https?:\/\/|data:|blob:)/i.test(raw)) return raw
+  return raw.startsWith('/') ? raw : `/${raw}`
+}
+
+function isKeyframeSlotPending(sbId, slot) {
+  if (!sbId) return false
+  return pendingKeyframeKeys.value.includes(`${sbId}:${slot}`)
+}
+
+function markKeyframePending(sbId, slot) {
+  const key = `${sbId}:${slot}`
+  if (!pendingKeyframeKeys.value.includes(key)) pendingKeyframeKeys.value.push(key)
+}
+
+function clearKeyframePending(sbId, slot) {
+  const key = `${sbId}:${slot}`
+  pendingKeyframeKeys.value = pendingKeyframeKeys.value.filter(k => k !== key)
+}
+
+async function pollKeyframeTask(taskId, storyboardId, slot, silent = false) {
+  const slotLabel = slot === 'last_frame' ? '尾帧' : '首帧'
+  if (!taskId) {
+    watchAsyncResult(() => {
+      const target = sbs.value.find(s => s.id === storyboardId)
+      const val = slot === 'last_frame'
+        ? (target?.last_frame_image || target?.lastFrameImage)
+        : (target?.first_frame_image || target?.firstFrameImage)
+      if (val) clearKeyframePending(storyboardId, slot)
+      return !!val
+    }, 45, 3000)
+    return
+  }
+  for (let i = 0; i < 90; i++) {
+    await sleep(3000)
+    try {
+      const res = await taskAPI.get(taskId)
+      await refresh()
+      if (res?.status === 'completed') {
+        clearKeyframePending(storyboardId, slot)
+        if (!silent) toast.success(`${slotLabel}已生成并锁定`)
+        return
+      }
+      if (res?.status === 'failed') {
+        clearKeyframePending(storyboardId, slot)
+        const errMsg = res?.error_msg || res?.errorMsg || `${slotLabel}生成失败`
+        if ((res?.error_code || res?.errorCode) !== 'user_cancelled') toastError(errMsg)
+        return
+      }
+    } catch {}
+  }
+  clearKeyframePending(storyboardId, slot)
+  await loadGenTasks()
+}
+
+function openCollageModal({ storyboard, shotNumber, slot = 'first_frame' }) {
+  if (!storyboard) return
+  collageModal.value = {
+    open: true,
+    storyboard,
+    shotNumber: shotNumber || shotNumberOf(storyboard) || 1,
+    slot,
+  }
+}
+
+async function onCollageSaved({ storyboardId, slot, taskId }) {
+  await refresh()
+  if (taskId && (slot === 'first_frame' || slot === 'last_frame')) {
+    markKeyframePending(storyboardId, slot)
+    pollKeyframeTask(taskId, storyboardId, slot)
+  }
+}
+
+async function generateShotKeyframe({ storyboard, slot }, opts = {}) {
+  if (!storyboard?.id) return
+  const targetSlot = slot === 'last_frame' ? 'last_frame' : 'first_frame'
+  const slotLabel = targetSlot === 'last_frame' ? '尾帧' : '首帧'
+  if (isKeyframeSlotPending(storyboard.id, targetSlot)) return
+
+  const scene = getStoryboardScene(storyboard)
+  const sbChars = getStoryboardCharacters(storyboard)
+  const sbProps = getStoryboardProps(storyboard)
+  const prompt = buildStoryboardKeyframePrompt(storyboard, targetSlot, scene, sbChars, sbProps)
+  if (!prompt.trim()) {
+    toast.error('请先补充镜头画面描述或绑定角色/场景后再生成关键帧')
+    return
+  }
+
+  const boundAll = getShotReferenceImages(storyboard)
+  const firstRaw = (storyboard.first_frame_image || storyboard.firstFrameImage || '').trim()
+  let refUrls = [...boundAll]
+  if (targetSlot === 'last_frame' && firstRaw) {
+    const mergedWithAll = [firstRaw, ...boundAll.filter(u => u !== firstRaw)]
+    if (selectedImageConfig.value?.provider === 'comfyui' && mergedWithAll.length > 3) {
+      // 首帧本身已渲染了当前场景空间，本地 3 图上限下用首帧替代场景底图并完整保留绑定角色/道具设定图
+      const charAndPropUrls = [
+        ...sbChars.map(c => c?.image_url || c?.imageUrl).filter(Boolean),
+        ...sbProps.map(p => p?.image_url || p?.imageUrl).filter(Boolean),
+      ]
+      refUrls = [firstRaw, ...charAndPropUrls.filter((u, idx, arr) => u !== firstRaw && arr.indexOf(u) === idx)]
+    } else {
+      refUrls = mergedWithAll
+    }
+  }
+
+  if (selectedImageConfig.value?.provider === 'comfyui' && refUrls.length > 3) {
+    toast.error('本地图片编辑模型最多支持 3 张参考图，请精简绑定素材或点「🎨 拼贴」合成为单张构图底图后再精绘')
+    return
+  }
+
+  markKeyframePending(storyboard.id, targetSlot)
+  try {
+    const task = await taskAPI.generate({
+      type: 'image',
+      storyboard_id: storyboard.id,
+      drama_id: dramaId,
+      frame_type: targetSlot,
+      size: aspectRatioToImageSize(dramaAspectRatio.value),
+      reference_images: refUrls.length ? refUrls : undefined,
+      model: bareModelName(imageModel.value) || undefined,
+      config_id: ownerConfigId(imageModelOptions.value, imageModel.value) || selectedImageConfig.value?.id,
+      prompt,
+    })
+    if (!opts.silent) toast.success(`已提交${slotLabel}绘制任务`)
+    await refresh()
+    pollKeyframeTask(task?.id, storyboard.id, targetSlot, !!opts.silent)
+  } catch (e) {
+    clearKeyframePending(storyboard.id, targetSlot)
+    toastError(e)
+  }
+}
+
+async function batchGenerateFirstFrames() {
+  const targets = sbs.value.filter(sb =>
+    !(sb.first_frame_image || sb.firstFrameImage) && !isKeyframeSlotPending(sb.id, 'first_frame'),
+  )
+  if (!targets.length) {
+    toast.info('所有分镜均已具备首帧或正在绘制中')
+    return
+  }
+  batchingKeyframes.value = true
+  try {
+    toast.success(`开始为 ${targets.length} 个镜头批量绘制首帧`)
+    await Promise.allSettled(
+      targets.map(sb => generateShotKeyframe({ storyboard: sb, slot: 'first_frame' }, { silent: true })),
+    )
+  } finally {
+    batchingKeyframes.value = false
+  }
+}
+
+function uploadShotKeyframe({ storyboard, slot }) {
+  if (!storyboard?.id) return
+  const targetSlot = slot === 'last_frame' ? 'last_frame' : 'first_frame'
+  const col = targetSlot === 'last_frame' ? 'last_frame_image' : 'first_frame_image'
+  const slotLabel = targetSlot === 'last_frame' ? '尾帧' : '首帧'
+  pickFile('image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp', async (file) => {
+    try {
+      const res = await uploadAPI.image(file)
+      await storyboardAPI.update(storyboard.id, { [col]: res.path })
+      toast.success(`已上传并锁定${slotLabel}`)
+      await refresh()
+    } catch (e) {
+      toastError(e)
+    }
+  })
+}
+
+async function clearShotKeyframe({ storyboard, slot }) {
+  if (!storyboard?.id) return
+  const col = slot === 'last_frame' ? 'last_frame_image' : 'first_frame_image'
+  try {
+    await storyboardAPI.update(storyboard.id, { [col]: null })
+    await refresh()
+  } catch (e) {
+    toastError(e)
+  }
+}
+
+async function relayTailFrame({ fromStoryboard, toStoryboard }) {
+  if (!fromStoryboard?.id || !toStoryboard?.id) return
+  try {
+    if (hasVid(fromStoryboard)) {
+      await storyboardAPI.extractFrame(fromStoryboard.id, {
+        position: 'last',
+        apply_to: 'next_first_frame',
+        target_storyboard_id: toStoryboard.id,
+      })
+      toast.success('已抽取上一镜视频结尾画面并锁定为本镜首帧')
+      await refresh()
+      return
+    }
+    const lastImg = fromStoryboard.last_frame_image || fromStoryboard.lastFrameImage
+    if (lastImg) {
+      await storyboardAPI.update(toStoryboard.id, { first_frame_image: lastImg })
+      toast.success('已沿用上一镜尾帧定格图作为本镜首帧')
+      await refresh()
+      return
+    }
+    const firstImg = fromStoryboard.first_frame_image || fromStoryboard.firstFrameImage
+    if (firstImg) {
+      await storyboardAPI.update(toStoryboard.id, { first_frame_image: firstImg })
+      toast.success('上一镜尚无视频/尾帧，已沿用其首帧定格图作为本镜首帧')
+      await refresh()
+      return
+    }
+    toast.error('上一镜尚无已生成的视频或关键帧，请先生成上一镜画面后再接力')
+  } catch (e) {
+    toastError(e)
+  }
+}
+
+async function extractSelfLastFrame(storyboard) {
+  if (!storyboard?.id) return
+  if (!hasVid(storyboard)) {
+    toast.error('当前镜头尚未生成视频，无法抽取尾帧')
+    return
+  }
+  try {
+    await storyboardAPI.extractFrame(storyboard.id, {
+      position: 'last',
+      apply_to: 'last_frame',
+    })
+    toast.success('已从当前视频抽取结尾画面设为尾帧')
+    await refresh()
+  } catch (e) {
+    toastError(e)
+  }
+}
+
 async function genVid(sb, opts = {}) {
   const localComfy = selectedVideoConfig.value?.provider === 'comfyui'
   if (localComfy && (Number(sb.duration || 10) < 2 || Number(sb.duration || 10) > 5)) {
-    toast.error('本地 Wan 2.2 仅支持 2–5 秒静音镜头，请先调整分镜时长；角色/场景参考图将先合成为首帧。')
+    toast.error('本地 Wan 2.2 仅支持 2–5 秒静音镜头，请先将分镜时长调整为 2–5 秒。')
     return
   }
   if (!opts.forceNew && canRecoverVideo(sb.id)) return recoverVideo(sb)
   const latest = latestVideoTask(sb.id)
   const forceNew = opts.forceNew || latest?.status === 'failed'
   if (forceNew && !window.confirm(t('episode.recovery.confirmNew'))) return
-  const referenceImages = getShotReferenceImages(sb)
-  // 参考素材完全来自分镜绑定的角色/场景/道具图片
+
+  const boundReferenceImages = getShotReferenceImages(sb)
+  const activeModelName = bareModelName(videoModel.value) || effectiveVideoModelLabel.value
+  let built
+  try {
+    built = buildVideoKeyframePayload({
+      storyboard: sb,
+      basePrompt: '__HB_PROMPT_SLOT__',
+      boundReferenceImages,
+      refLimit: refImageLimit.value,
+      provider: selectedVideoConfig.value?.provider,
+      model: activeModelName,
+      resolution: episodeResolution.value,
+      preferKeyframes: preferKeyframesInVideo.value,
+    })
+  } catch (capErr) {
+    toast.error(capErr?.message || '关键帧与当前视频模型能力不兼容')
+    return
+  }
+
+  const resolvedUserPrompt = resolveVideoPromptRefs(sb, built.reference_image_urls)
+  let finalPrompt = built.prompt.replace('__HB_PROMPT_SLOT__', () => resolvedUserPrompt).trim()
+  if (!resolvedUserPrompt) finalPrompt = finalPrompt.replace(/。\s*$/, '').trim()
+
   const params = {
     storyboard_id: sb.id,
     drama_id: dramaId,
-    prompt: resolveVideoPromptRefs(sb),
+    prompt: finalPrompt,
     duration: Number(sb.duration || 10),
     aspect_ratio: dramaAspectRatio.value,
     generate_audio: !localComfy,
     model: bareModelName(videoModel.value) || undefined,
     config_id: ownerConfigId(videoModelOptions.value, videoModel.value),
-    reference_image_urls: referenceImages,
+    ...(built.first_frame_url ? { first_frame_url: built.first_frame_url } : {}),
+    ...(built.last_frame_url ? { last_frame_url: built.last_frame_url } : {}),
+    reference_image_urls: built.reference_image_urls,
   }
-  if (!params.prompt && !referenceImages.length) {
+  if (!params.prompt && !params.reference_image_urls.length && !params.first_frame_url && !params.last_frame_url) {
     toast.error(t('episode.vid.needRefOrPrompt'))
     return
+  }
+  if (built.notice && !opts.silent) {
+    toast.info(built.notice)
   }
   try {
     delete failedVideoMessages.value[sb.id]
@@ -6286,5 +6921,236 @@ button.video-task-metric.on { box-shadow: 0 0 0 2px var(--accent); }
     width: 100%;
   }
 
+}
+
+/* ===== 流水线 ↔ 导演画布切换与首尾关键帧控制 ===== */
+.view-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  gap: 2px;
+}
+
+.view-mode-tab {
+  height: 24px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: background 0.16s, color 0.16s, box-shadow 0.16s;
+}
+
+.view-mode-tab:hover {
+  color: var(--text-0);
+}
+
+.view-mode-tab.on {
+  background: var(--surface-raised);
+  color: var(--text-0);
+  box-shadow: var(--shadow-xs);
+}
+
+.canvas-workbench-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 520px;
+  display: flex;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+}
+
+.canvas-shot-drawer {
+  width: min(500px, 100vw);
+}
+
+.canvas-drawer-scroll {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.canvas-drawer-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.video-task-kf-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.video-task-kf-badge {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(245, 158, 11, 0.88);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 750;
+  line-height: 1.45;
+}
+
+.kf-inspector-card {
+  padding: 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+
+.kf-drive-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-2);
+  cursor: pointer;
+  user-select: none;
+}
+
+.kf-drive-toggle input {
+  accent-color: var(--accent);
+}
+
+.kf-cap-hint {
+  margin: 4px 0 8px;
+  font-size: 11px;
+  color: var(--accent-text, var(--accent));
+  font-weight: 600;
+}
+
+.kf-slots-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.kf-slot-box {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.kf-slot-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-1);
+}
+
+.kf-link-btn {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-size: 10.5px;
+  font-weight: 650;
+  color: var(--accent-text, var(--accent));
+  cursor: pointer;
+}
+
+.kf-link-btn:hover {
+  text-decoration: underline;
+}
+
+.kf-slot-thumb {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border-radius: 7px;
+  overflow: hidden;
+  border: 1px solid var(--surface-outline);
+  background: var(--bg-2);
+}
+
+.kf-slot-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  cursor: zoom-in;
+}
+
+.kf-slot-empty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+.kf-slot-clear {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.kf-slot-clear:hover {
+  background: var(--error);
+}
+
+.kf-slot-btns {
+  display: flex;
+  gap: 4px;
+}
+
+.kf-mini-btn {
+  flex: 1;
+  height: 23px;
+  padding: 0 5px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text-1);
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.kf-mini-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-0);
+}
+
+.kf-mini-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.kf-mini-btn.is-accent {
+  border-color: rgba(59, 130, 246, 0.32);
+  color: var(--accent-text, var(--accent));
 }
 </style>

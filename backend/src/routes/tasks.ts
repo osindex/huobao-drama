@@ -153,13 +153,13 @@ function validateVideoRequest(body: any, provider?: string): string | null {
     } catch (error: any) { return error.message }
   }
 
-  if (provider === 'comfyui') {
-    if (last || vids || auds || file || link) return '本地 Wan 2.2 不支持尾帧、参考音视频或文件'
-    if (body.generate_audio === true) return '本地 Wan 2.2 仅生成静音视频'
-    if (Number(body.duration || 5) < 2 || Number(body.duration || 5) > 5) return '本地视频时长仅支持 2–5 秒'
-    if (imgs > 3) return '本地分镜首帧合成最多支持 3 张参考图'
-    if (!first && !body.image_url && !imgs) return '本地视频需要首帧图片或角色/场景参考图'
-  }
+    if ((provider || '').toLowerCase() === 'comfyui') {
+      if (last || vids || auds || file || link) return '本地 Wan 2.2 不支持尾帧、参考音视频或文件'
+      if (body.generate_audio === true) return '本地 Wan 2.2 仅生成静音视频'
+      if (Number(body.duration || 5) < 2 || Number(body.duration || 5) > 5) return '本地视频时长仅支持 2–5 秒'
+      if (!first && !body.image_url && imgs > 3) return '本地分镜首帧合成最多支持 3 张参考图'
+      if (!first && !body.image_url && !imgs) return '本地视频需要首帧图片或角色/场景参考图'
+    }
 
   if ((provider || '').toLowerCase() === 'aliyun') {
     if (imgs > 10 || vids > 5 || auds > 5) return 'Wan 3.0 参考素材超限：图片≤10、视频≤5、音频≤5'
@@ -244,6 +244,15 @@ app.post('/', async (c) => {
       }
     }
 
+    if (type === 'image') {
+      const effectiveImageConfig = configId
+        ? (await getConfigById(configId)) ?? await getActiveConfig('image')
+        : await getActiveConfig('image')
+      if (effectiveImageConfig?.provider === 'comfyui' && Array.isArray(body.reference_images) && body.reference_images.length > 3) {
+        return badRequest(c, '本地图片编辑模型最多支持 3 张参考图，请精简绑定素材或使用「空间拼贴」合成为单张构图底图')
+      }
+    }
+
     if (type === 'video' && videoBody) {
       const effectiveConfig = configId
         ? (await getConfigById(configId)) ?? await getActiveConfig('video')
@@ -271,6 +280,16 @@ app.post('/', async (c) => {
     })
     logTaskPayload('TaskAPI', 'request body', body)
 
+    // 分镜关键帧生图时自动注入项目视觉风格词（与角色/场景/道具/视频保持统一画风）
+    let imagePrompt = String(body.prompt || '')
+    if (type === 'image' && body.storyboard_id && !body.skip_style && imagePrompt.trim()) {
+      const dramaId = body.drama_id ?? storyboardDramaId ?? null
+      const stylePrompt = await getDramaStylePrompt(dramaId)
+      if (stylePrompt && !imagePrompt.startsWith(stylePrompt)) {
+        imagePrompt = `${stylePrompt}，\n${imagePrompt}`
+      }
+    }
+
     // 视频生成时把项目视觉风格词注入提示词最前方（与图片侧的自动注入保持一致口径）
     let videoPrompt = videoBody?.prompt
     if (type === 'video' && String(videoPrompt || '').trim()) {
@@ -286,7 +305,7 @@ app.post('/', async (c) => {
         sceneId: body.scene_id,
         characterId: body.character_id,
         propId: body.prop_id,
-        prompt: body.prompt,
+        prompt: imagePrompt,
         model: body.model,
         size: body.size,
         referenceImages: body.reference_images,

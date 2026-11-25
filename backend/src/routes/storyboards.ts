@@ -1,12 +1,25 @@
 import { Hono } from 'hono'
-import { eq } from 'drizzle-orm'
+import { asc, eq } from 'drizzle-orm'
 import { db, getInsertId, schema } from '../db/index.js'
 import { success, created, now, badRequest } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
+import { getAbsolutePath } from '../utils/storage.js'
+import { extractVideoFrame } from '../utils/video-frame.js'
 import { checkEpisodeIdAccess, checkStoryboardIdAccess, respondAccessDenied } from '../services/team-access.js'
-import { logTaskPayload, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
+import { logTaskError, logTaskPayload, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
 const app = new Hono()
+
+function normalizeMediaSlotValue(val: unknown): string | null {
+  if (val === null || val === '') return null
+  if (typeof val !== 'string') throw new Error('媒体路径格式无效')
+  const trimmed = val.trim().replace(/^\/+/, '')
+  if (!trimmed) return null
+  if (/^https?:\/\//i.test(trimmed)) return trimmed
+  // 校验必须在 static/ 目录树内，阻断路径穿越
+  getAbsolutePath(trimmed)
+  return trimmed.startsWith('static/') ? trimmed : `static/${trimmed}`
+}
 
 async function syncStoryboardCharacters(storyboardId: number, characterIds: number[]) {
   await db.delete(schema.storyboardCharacters)
@@ -96,6 +109,17 @@ app.post('/', async (c) => {
     storyboardNumber: body.storyboard_number || 1,
     title: body.title,
     description: body.description,
+    shotType: body.shot_type,
+    angle: body.angle,
+    movement: body.movement,
+    location: body.location,
+    time: body.time,
+    atmosphere: body.atmosphere,
+    imagePrompt: body.image_prompt,
+    videoPrompt: body.video_prompt,
+    composedImage: body.composed_image ? normalizeMediaSlotValue(body.composed_image) : null,
+    firstFrameImage: body.first_frame_image ? normalizeMediaSlotValue(body.first_frame_image) : null,
+    lastFrameImage: body.last_frame_image ? normalizeMediaSlotValue(body.last_frame_image) : null,
     sceneId: body.scene_id,
     duration: body.duration || 10,
     createdAt: ts,
@@ -133,6 +157,7 @@ app.put('/:id', async (c) => {
   logTaskPayload('StoryboardAPI', 'update body', body)
 
   const fieldMap: Record<string, string> = {
+    storyboard_number: 'storyboardNumber',
     title: 'title', description: 'description', shot_type: 'shotType',
     angle: 'angle', movement: 'movement', duration: 'duration',
     video_prompt: 'videoPrompt',
@@ -140,11 +165,25 @@ app.put('/:id', async (c) => {
     time: 'time', atmosphere: 'atmosphere', result: 'result',
     bgm_prompt: 'bgmPrompt', sound_effect: 'soundEffect',
     video_url: 'videoUrl',
+    composed_image: 'composedImage',
+    first_frame_image: 'firstFrameImage',
+    last_frame_image: 'lastFrameImage',
+    reference_images: 'referenceImages',
   }
 
+  const mediaKeys = new Set(['video_url', 'composed_image', 'first_frame_image', 'last_frame_image'])
+
   const updates: Record<string, any> = { updatedAt: now() }
-  for (const [snakeKey, camelKey] of Object.entries(fieldMap)) {
-    if (snakeKey in body) updates[camelKey] = body[snakeKey]
+  try {
+    for (const [snakeKey, camelKey] of Object.entries(fieldMap)) {
+      if (snakeKey in body) {
+        updates[camelKey] = mediaKeys.has(snakeKey)
+          ? normalizeMediaSlotValue(body[snakeKey])
+          : body[snakeKey]
+      }
+    }
+  } catch (err: any) {
+    return badRequest(c, err.message)
   }
 
   await validateStoryboardBindings(
@@ -164,6 +203,88 @@ app.put('/:id', async (c) => {
     propIds: body.prop_ids,
   })
   return success(c)
+})
+
+// POST /storyboards/:id/extract-frame — 从分镜视频抽取首帧/尾帧/指定秒数帧，支持一键接力写入本镜或下一镜
+app.post('/:id/extract-frame', async (c) => {
+  const id = Number(c.req.param('id'))
+  const access = checkStoryboardIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+  const storyboard = access.storyboard!
+
+  const body = await c.req.json().catch(() => ({}))
+  const position = body.position === 'first' || body.position === 'timestamp' ? body.position : 'last'
+  const timestamp = typeof body.timestamp === 'number' ? body.timestamp : undefined
+  const applyTo = body.apply_to as 'first_frame' | 'last_frame' | 'next_first_frame' | 'none' | undefined
+
+  try {
+    const sourceVideo = body.source_video_url
+      ? normalizeMediaSlotValue(body.source_video_url)
+      : storyboard.videoUrl
+    if (!sourceVideo) {
+      return badRequest(c, '当前分镜尚未生成本地视频，无法抽取关键帧')
+    }
+
+    const framePath = await extractVideoFrame(sourceVideo, { position, timestamp })
+    let updatedStoryboardId: number | null = null
+    let updatedField: string | null = null
+
+    if (applyTo === 'first_frame') {
+      await db.update(schema.storyboards)
+        .set({ firstFrameImage: framePath, updatedAt: now() })
+        .where(eq(schema.storyboards.id, id))
+      updatedStoryboardId = id
+      updatedField = 'first_frame_image'
+    } else if (applyTo === 'last_frame') {
+      await db.update(schema.storyboards)
+        .set({ lastFrameImage: framePath, updatedAt: now() })
+        .where(eq(schema.storyboards.id, id))
+      updatedStoryboardId = id
+      updatedField = 'last_frame_image'
+    } else if (applyTo === 'next_first_frame') {
+      let targetSb: typeof schema.storyboards.$inferSelect | undefined
+      if (body.target_storyboard_id) {
+        const [candidate] = await db.select().from(schema.storyboards)
+          .where(eq(schema.storyboards.id, Number(body.target_storyboard_id)))
+        if (!candidate || candidate.episodeId !== storyboard.episodeId) {
+          return badRequest(c, '目标分镜不存在或不属于同一集')
+        }
+        targetSb = candidate
+      } else {
+        const episodeSbs = await db.select().from(schema.storyboards)
+          .where(eq(schema.storyboards.episodeId, storyboard.episodeId))
+          .orderBy(asc(schema.storyboards.storyboardNumber), asc(schema.storyboards.id))
+        const curIdx = episodeSbs.findIndex(s => s.id === id)
+        if (curIdx === -1 || curIdx >= episodeSbs.length - 1) {
+          return badRequest(c, '当前已是最后一镜，没有可接力的下一镜')
+        }
+        targetSb = episodeSbs[curIdx + 1]
+      }
+      await db.update(schema.storyboards)
+        .set({ firstFrameImage: framePath, updatedAt: now() })
+        .where(eq(schema.storyboards.id, targetSb.id))
+      updatedStoryboardId = targetSb.id
+      updatedField = 'first_frame_image'
+    }
+
+    logTaskSuccess('StoryboardAPI', 'extract-frame', {
+      storyboardId: id,
+      position,
+      framePath,
+      updatedStoryboardId,
+      updatedField,
+    })
+
+    return success(c, {
+      path: framePath,
+      url: `/${framePath}`,
+      updated_storyboard_id: updatedStoryboardId,
+      updated_field: updatedField,
+    })
+  } catch (err: any) {
+    logTaskError('StoryboardAPI', 'extract-frame', { storyboardId: id, error: err.message })
+    return badRequest(c, err.message)
+  }
 })
 
 // DELETE /storyboards/:id
