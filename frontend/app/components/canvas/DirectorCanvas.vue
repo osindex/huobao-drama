@@ -416,6 +416,12 @@
               </div>
 
               <div class="dc-media-box is-video-box" :style="mediaAspectStyle">
+                <span
+                  v-if="shotVideoUrl(sb) && shotTakeKind(sb)"
+                  class="dc-take-kind"
+                  :class="'is-' + shotTakeKind(sb)!.key"
+                  :title="shotTakeKind(sb)!.title"
+                >{{ shotTakeKind(sb)!.text }}</span>
                 <video
                   v-if="shotVideoUrl(sb)"
                   :key="shotVideoUrl(sb)"
@@ -454,7 +460,8 @@
                   class="dc-mini-btn is-primary-solid"
                   @click.stop="emit('generateVideo', sb)"
                 >
-                  🎬 {{ shotVideoUrl(sb) ? '重出视频' : (hasAnyKeyframe(sb) ? '按关键帧生视频' : '生成视频') }}
+                  <template v-if="draftMode">⚡ {{ shotVideoUrl(sb) ? '重出草稿' : '草稿试拍' }}</template>
+                  <template v-else>🎬 {{ shotVideoUrl(sb) ? '重出视频' : (hasAnyKeyframe(sb) ? '按关键帧生视频' : '生成视频') }}</template>
                 </button>
                 <button
                   v-if="shotVideoUrl(sb) && idx < storyboards.length - 1"
@@ -465,6 +472,38 @@
                   @click.stop="handleRelayToNext(sb, storyboards[idx + 1])"
                 >
                   ⚡ 传下镜
+                </button>
+              </div>
+
+              <!-- 省流制片：草稿精制 / 光流慢放（仅对已出片且未在生成中的镜头显示） -->
+              <div v-if="shotVideoUrl(sb) && !isShotVideoPending(sb.id)" class="dc-slot-actions is-sub">
+                <button
+                  v-if="shotTakeKind(sb)?.key === 'draft'"
+                  type="button"
+                  class="dc-mini-btn is-hd"
+                  :disabled="isHdRefining(sb.id)"
+                  title="草稿满意后高清精制：优先以草稿视频作为 V2V 动作参考重绘，模型不支持时自动抽取草稿首尾帧按关键帧重制（提交前会显示具体方案并确认）"
+                  @click.stop="emit('hdRefine', sb)"
+                >
+                  <Loader2 v-if="isHdRefining(sb.id)" :size="10" class="animate-spin" />
+                  💎 高清精制
+                </button>
+                <button
+                  type="button"
+                  class="dc-mini-btn"
+                  title="FFmpeg 光流补帧慢放扩时长（0 算力点）。适合空镜/景物/情绪特写，不适合对白口型镜头"
+                  @click.stop="emit('slowMotion', sb)"
+                >
+                  🐢 慢放
+                </button>
+                <button
+                  v-if="shotTakeKind(sb)?.key === 'slowmo'"
+                  type="button"
+                  class="dc-mini-btn"
+                  title="切回慢放前的原速成片，并恢复分镜时长"
+                  @click.stop="emit('restoreSpeed', sb)"
+                >
+                  ↩ 原速
                 </button>
               </div>
             </div>
@@ -653,6 +692,7 @@ import { toast } from 'vue-sonner'
 import { episodeAPI, storyboardAPI } from '~/composables/useApi'
 import { toastError } from '~/composables/useToast'
 import { getVideoKeyframeCapability } from './keyframeCapabilities'
+import { isTaskDraftVideo, isTaskSlowMotionVideo, parseTaskParamsSafe } from './costSavingCapabilities'
 
 interface ShotNodePos {
   x: number
@@ -697,6 +737,10 @@ const props = defineProps<{
   videoProvider?: string | null
   videoModel?: string | null
   videoResolution?: string | null
+  /** 极速草稿开关（由工作台工具栏统一控制，此处仅用于按钮文案与徽章提示） */
+  draftMode?: boolean
+  /** 正在提交高清精制的分镜 ID */
+  hdRefiningIds?: number[]
 }>()
 
 const emit = defineEmits<{
@@ -710,6 +754,9 @@ const emit = defineEmits<{
   (e: 'extractSelfLastFrame', storyboard: any): void
   (e: 'generateVideo', storyboard: any): void
   (e: 'stopVideo', storyboard: any): void
+  (e: 'hdRefine', storyboard: any): void
+  (e: 'slowMotion', storyboard: any): void
+  (e: 'restoreSpeed', storyboard: any): void
   (e: 'batchFirstFrames'): void
   (e: 'previewImage', payload: { src: string; title: string }): void
   (e: 'refresh'): void
@@ -812,25 +859,75 @@ function videoDriveBadgeText(sb: any): string {
   return '素材参考'
 }
 
+// sys_task 成片落盘路径在 local_path（/episodes/:id/generation-tasks 为 snake_case）；兼容旧字段名
+function takePath(t: any): string {
+  return String(t?.local_path || t?.localPath || t?.video_url || t?.videoUrl || '').replace(/^\/+/, '')
+}
+
+// 同一分镜的全部本地候选成片（按落盘路径去重）
 function shotVideoTakes(sbId: number): any[] {
-  return props.genTasks.filter(
-    t => t.type === 'video' && t.storyboard_id === sbId && t.status === 'completed' && (t.video_url || t.videoUrl),
-  )
+  const takes: any[] = []
+  for (const t of props.genTasks) {
+    if (t.type !== 'video' || t.storyboard_id !== sbId || t.status !== 'completed') continue
+    const p = takePath(t)
+    if (!p.startsWith('static/') || takes.some(u => takePath(u) === p)) continue
+    takes.push(t)
+  }
+  return takes
+}
+
+function currentShotTake(sb: any): any | null {
+  const current = shotVideoUrl(sb).replace(/^\/+/, '')
+  if (!current) return null
+  return shotVideoTakes(sb.id)
+    .slice()
+    .sort((a, b) => b.id - a.id)
+    .find(t => takePath(t) === current) || null
+}
+
+type TakeKind = { key: 'draft' | 'slowmo' | 'origin' | 'hd'; text: string; title: string }
+
+function takeKind(task: any): TakeKind | null {
+  if (!task) return null
+  const p = parseTaskParamsSafe(task)
+  if (isTaskSlowMotionVideo(task)) {
+    return { key: 'slowmo', text: p.speed ? `🐢 慢放 ${p.speed}x` : '🐢 慢放', title: 'FFmpeg 光流升格慢放版本（0 算力点，由原速成片派生）' }
+  }
+  if (p.archivedBeforeSlowMotion) return { key: 'origin', text: '原速', title: '慢放前的原速成片归档' }
+  if (isTaskDraftVideo(task)) return { key: 'draft', text: '⚡ 草稿', title: '极速草稿试拍版本（低分辨率/轻量模型），满意后可高清精制' }
+  if (p.sourceDraftTaskId) return { key: 'hd', text: '💎 精制', title: `由草稿任务 #${p.sourceDraftTaskId} 高清精制而来` }
+  return null
+}
+
+function shotTakeKind(sb: any): TakeKind | null {
+  return takeKind(currentShotTake(sb))
+}
+
+function isHdRefining(sbId: number): boolean {
+  return Boolean(props.hdRefiningIds?.includes(sbId))
 }
 
 async function cycleShotTake(sb: any) {
   const takes = shotVideoTakes(sb.id)
   if (takes.length < 2) return
-  const current = shotVideoUrl(sb)
-  const paths = takes
-    .map(t => String(t.video_url || t.videoUrl || '').replace(/^\/+/, ''))
-    .filter(p => p.startsWith('static/'))
-  if (paths.length < 2) return
-  const idx = paths.indexOf(current.replace(/^\/+/, ''))
-  const nextPath = paths[(idx + 1) % paths.length]
+  const current = shotVideoUrl(sb).replace(/^\/+/, '')
+  const uniqueTakes = takes
+  const idx = uniqueTakes.findIndex(t => takePath(t) === current)
+  const nextIdx = (idx + 1) % uniqueTakes.length
+  const nextTake = uniqueTakes[nextIdx]
+  // 在慢放版本与原速版本之间切换时同步分镜时长，避免时长与实际成片不一致
+  const nextSeconds = Math.round(Number(parseTaskParamsSafe(nextTake).duration) || 0)
+  const crossesSlowMo = isTaskSlowMotionVideo(nextTake) || isTaskSlowMotionVideo(idx >= 0 ? uniqueTakes[idx] : null)
+  const syncDuration = crossesSlowMo && nextSeconds >= 1 && nextSeconds !== Number(sb.duration)
   try {
-    await storyboardAPI.update(sb.id, { video_url: nextPath })
-    toast.success(`已切换候选版本 (${((idx + 1) % paths.length) + 1}/${paths.length})`)
+    await storyboardAPI.update(sb.id, {
+      video_url: takePath(nextTake),
+      ...(syncDuration ? { duration: nextSeconds } : {}),
+    })
+    const kind = takeKind(nextTake)
+    toast.success(
+      `已切换候选版本 (${nextIdx + 1}/${uniqueTakes.length})${kind ? ` · ${kind.text}` : ''}${syncDuration ? ` · 分镜时长同步为 ${nextSeconds}s` : ''}`,
+    )
     emit('refresh')
   } catch (err) {
     toastError(err)
@@ -2326,6 +2423,32 @@ onBeforeUnmount(() => {
   border-color: var(--error);
   font-weight: 600;
 }
+.dc-mini-btn.is-hd {
+  background: var(--info-bg);
+  color: var(--info);
+  border-color: var(--info);
+  font-weight: 600;
+}
+
+/* 省流制片：成片版本徽章（草稿 / 慢放 / 原速 / 精制） */
+.dc-take-kind {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 2;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1.7;
+  color: #fff;
+  pointer-events: auto;
+  cursor: help;
+}
+.dc-take-kind.is-draft { background: rgba(217, 119, 6, 0.92); }
+.dc-take-kind.is-slowmo { background: rgba(37, 99, 235, 0.92); }
+.dc-take-kind.is-origin { background: rgba(0, 0, 0, 0.62); }
+.dc-take-kind.is-hd { background: rgba(22, 163, 74, 0.92); }
 
 /* Card Footer */
 .dc-card-foot {

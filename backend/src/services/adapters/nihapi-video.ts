@@ -100,7 +100,13 @@ export class NihapiVideoAdapter implements VideoProviderAdapter {
         if (last) body.last_frame_url = last
       }
     }
-    if (isTiered) { body.tier = 'fast'; if (record.seed != null) body.seed = record.seed }
+    if (record.speedTier && !['fast', 'standard'].includes(record.speedTier)) {
+      throw new Error('NIH API speed_tier 仅支持 fast 或 standard')
+    }
+    if (isTiered) {
+      body.tier = record.speedTier === 'standard' ? 'standard' : 'fast'
+      if (record.seed != null) body.seed = record.seed
+    }
     if (model.startsWith('kling-') && record.generateAudio != null) body.audio = Boolean(record.generateAudio)
     if (model === 'MiniMax-H3-LH' && record.promptExtend != null) body.prompt_enhance = Boolean(record.promptExtend)
     return { url: joinProviderUrl(config.baseUrl, '/v1', '/videos'), method: 'POST', headers: this.headers(config), body }

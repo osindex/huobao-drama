@@ -92,6 +92,8 @@ export interface ImageGenerationRecord {
   size?: string | null
   frameType?: string | null
   referenceImages?: string | null
+  draftMode?: boolean | number | null
+  steps?: number | null
   // ... 其他字段
 }
 
@@ -115,6 +117,8 @@ export interface VideoGenerationRecord {
   seed?: number | null
   promptExtend?: number | boolean | null
   watermark?: number | boolean | null
+  draftMode?: boolean | number | null
+  speedTier?: 'fast' | 'standard' | null
   // ... 其他字段
 }
 

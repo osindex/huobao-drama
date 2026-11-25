@@ -509,6 +509,17 @@
                   ❖ 导演画布
                 </button>
               </div>
+              <label
+                class="draft-mode-toggle"
+                :class="{ on: draftModeOn }"
+                title="极速草稿：以低分辨率 / 轻量模型 / 静音快速试拍，确认构图与运镜后再「高清精制」。仅在开启时生效，不会静默替换你选择的模型。"
+              >
+                <input v-model="draftModeOn" type="checkbox" />
+                <span>⚡ 极速草稿</span>
+              </label>
+              <span v-if="activeTurboPlan" class="tag draft-mode-plan" :title="activeTurboPlan.detailHint">
+                {{ activeTurboPlan.swappedModel ? '已切换 · ' : '' }}{{ activeTurboPlan.summaryBadge }}
+              </span>
               <div class="ml-auto flex gap-1">
                 <button class="btn btn-sm" :disabled="rn" @click="doBreakdown">
                   <Loader2 v-if="rt === 'storyboard_breaker'" :size="11" class="animate-spin" />
@@ -572,8 +583,13 @@
                 @clear-keyframe="clearShotKeyframe"
                 @relay-tail-to-next="relayTailFrame"
                 @extract-self-last-frame="extractSelfLastFrame"
+                :draft-mode="draftModeOn"
+                :hd-refining-ids="hdRefiningIds"
                 @generate-video="sb => genVid(sb)"
                 @stop-video="sb => stopVideo(sb)"
+                @hd-refine="sb => hdRefineVideo(sb)"
+                @slow-motion="sb => openSlowMoDialog(sb)"
+                @restore-speed="sb => restoreOriginalSpeed(sb)"
                 @batch-first-frames="batchGenerateFirstFrames"
                 @preview-image="p => openImageViewer(p.src, p.title)"
                 @refresh="refresh"
@@ -939,6 +955,43 @@
                 <span v-if="playerLoadFailed">{{ t('episode.recovery.remoteUnavailable') }}</span>
                 <button v-if="!previewVideoUrl && canRecoverVideo(selectedSb?.id)" class="btn btn-sm" @click="recoverVideo(selectedSb)">{{ t('episode.recovery.restoreDownload') }}</button>
               </div>
+              <!-- 省流制片：草稿精制 / 光流慢放（仅作用于当前主成片） -->
+              <div v-if="hasVid(selectedSb) && !previewVideoUrl && !playerIsRemote" class="cost-suite-bar">
+                <span
+                  v-if="selectedVideoKind"
+                  :class="['take-kind-chip', 'is-' + selectedVideoKind.key]"
+                  :title="selectedVideoKind.title"
+                >{{ selectedVideoKind.text }}</span>
+                <button
+                  v-if="selectedHdPlan"
+                  type="button"
+                  class="btn btn-sm cost-suite-hd"
+                  :disabled="isPendingVideo(selectedSb.id) || hdRefiningIds.includes(selectedSb.id)"
+                  :title="selectedHdPlan.description"
+                  @click="hdRefineVideo(selectedSb)"
+                >
+                  <Loader2 v-if="hdRefiningIds.includes(selectedSb.id)" :size="11" class="animate-spin" />
+                  {{ selectedHdPlan.buttonLabel }}
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-sm"
+                  :disabled="isPendingVideo(selectedSb.id)"
+                  title="FFmpeg 运动补偿光流补帧慢放，把短镜头无损扩时长（0 算力点）。适合空镜/景物/情绪特写，不适合对白口型镜头。"
+                  @click="openSlowMoDialog(selectedSb)"
+                >
+                  🐢 光流慢放
+                </button>
+                <button
+                  v-if="selectedVideoKind?.key === 'slowmo'"
+                  type="button"
+                  class="btn btn-sm"
+                  title="切回慢放前的原速成片，并恢复分镜时长"
+                  @click="restoreOriginalSpeed(selectedSb)"
+                >
+                  ↩ 还原原速
+                </button>
+              </div>
             </aside>
 
             <div v-if="sbVideoHistory.length" class="video-player-history">
@@ -958,6 +1011,11 @@
                 >
                   <video :src="videoSourceUrl(taskVideoPath(h))" :poster="posterOf(videoSourceUrl(taskVideoPath(h))) || undefined" preload="none" muted playsinline tabindex="-1" />
                   <span class="video-history-time">{{ formatHistoryTime(taskCreatedAt(h)) }}</span>
+                  <span
+                    v-if="videoTakeKind(h)"
+                    :class="['video-history-kind', 'is-' + videoTakeKind(h).key]"
+                    :title="videoTakeKind(h).title"
+                  >{{ videoTakeKind(h).text }}</span>
                   <span v-if="isCurrentVideo(h)" class="video-history-badge">{{ t('episode.vid.current') }}</span>
                   <button v-else type="button" class="video-history-del" :title="t('episode.vid.deleteRecord')" @click.stop="removeHistoryVideo(h)">×</button>
                 </div>
@@ -1702,13 +1760,76 @@
           <div class="dialog-body batch-video-body">
             <div class="batch-video-row"><span>{{ t('episode.vid.confirmShots') }}</span><strong>{{ t('episode.vid.confirmShotsValue', { n: batchVideoConfirm.targets.length }) }}</strong></div>
             <div class="batch-video-row"><span>{{ t('episode.vid.confirmTotal') }}</span><strong>{{ t('episode.vid.confirmApprox', { n: batchVideoTotalDuration }) }}</strong></div>
-            <div class="batch-video-row"><span>{{ t('episode.vid.confirmModel') }}</span><strong>{{ effectiveVideoModelLabel || t('episode.vid.defaultModel') }}</strong></div>
-            <div class="batch-video-row"><span>{{ t('episode.vid.confirmResolution') }}</span><strong>{{ episodeResolutionLabel }}</strong></div>
+            <div class="batch-video-row"><span>{{ t('episode.vid.confirmModel') }}</span><strong>{{ batchTurboPlan?.swappedModel ? `${batchTurboPlan.model}（草稿轻量模型）` : (effectiveVideoModelLabel || t('episode.vid.defaultModel')) }}</strong></div>
+            <div class="batch-video-row"><span>{{ t('episode.vid.confirmResolution') }}</span><strong>{{ batchTurboPlan ? `草稿档位 · ${batchTurboPlan.summaryBadge}` : episodeResolutionLabel }}</strong></div>
+            <p v-if="batchTurboPlan" class="batch-video-note batch-video-draft-note">
+              ⚡ 极速草稿已开启：{{ batchTurboPlan.detailHint }}。各镜头会按自身尾帧 / 参考图 / 音色引用情况分别判定档位；本批产出均为低清试拍版本，满意后可逐镜「高清精制」。
+            </p>
             <p class="batch-video-note">{{ t('episode.vid.confirmNote') }}</p>
           </div>
           <footer class="dialog-foot">
             <button class="btn" @click="batchVideoConfirm.open = false">{{ t('common.cancel') }}</button>
             <button class="btn btn-primary" @click="confirmBatchVideos">{{ t('episode.vid.confirmStart', { n: batchVideoConfirm.targets.length }) }}</button>
+          </footer>
+        </div>
+      </div>
+
+      <!-- 光流升格慢放（流水线与导演画布共用） -->
+      <div v-if="slowMoDialog.open" class="overlay" @click.self="closeSlowMoDialog">
+        <div class="dialog batch-video-dialog slowmo-dialog">
+          <header class="dialog-head">
+            <h2 class="dialog-title">🐢 光流升格慢放 · 扩时长</h2>
+            <button class="btn btn-ghost btn-icon" :disabled="slowMoDialog.busy" @click="closeSlowMoDialog">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </header>
+          <div class="dialog-body batch-video-body">
+            <p class="batch-video-note">
+              用 FFmpeg 运动补偿光流补帧把已生成的短镜头放慢并补足帧率，不调用视频模型、不消耗算力点。原速成片会保留在历史记录中，可随时还原。
+            </p>
+            <div v-if="slowMoRisk" class="slowmo-warning">
+              ⚠ 检测到该镜头含对白 / 口型 / 角色音色引用：慢放会让口型与语速同步变慢，观感失真。建议仅用于空镜、景物、情绪特写等无对白镜头。
+            </div>
+            <div v-if="slowMoSource.fromOriginal" class="slowmo-info">
+              当前成片已是慢放版本{{ slowMoSource.previousSpeed ? `（${slowMoSource.previousSpeed}x）` : '' }}，本次将基于其原速片源重新慢放，不会叠加二次补帧。
+            </div>
+            <div class="slowmo-presets" role="radiogroup" aria-label="慢放倍率">
+              <label
+                v-for="preset in SLOW_MOTION_PRESETS"
+                :key="preset.speed"
+                class="slowmo-preset"
+                :class="{ on: slowMoDialog.speed === preset.speed }"
+              >
+                <input v-model="slowMoDialog.speed" type="radio" name="slowmo-speed" :value="preset.speed" :disabled="slowMoDialog.busy" />
+                <span>{{ preset.label }}</span>
+              </label>
+            </div>
+            <div class="batch-video-row">
+              <span>预计时长</span>
+              <strong v-if="slowMoEstimatedSeconds">约 {{ slowMoSource.seconds }}s → {{ slowMoEstimatedSeconds }}s · 24fps</strong>
+              <strong v-else>按原片实际时长计算</strong>
+            </div>
+            <div class="batch-video-row">
+              <span>补帧算法</span>
+              <select v-model="slowMoDialog.mode" class="input slowmo-select" :disabled="slowMoDialog.busy">
+                <option value="optical_flow">运动补偿光流（画质优先，较慢）</option>
+                <option value="blend">帧混合（极速，运动大时有重影）</option>
+              </select>
+            </div>
+            <label class="slowmo-check">
+              <input v-model="slowMoDialog.keepAudio" type="checkbox" :disabled="slowMoDialog.busy" />
+              <span>保留原声并同步降速（默认关闭 = 输出静音；环境音可保留，对白会被拖慢）</span>
+            </label>
+            <p class="batch-video-note">
+              完成后会替换为该镜头主成片，并把分镜时长同步为慢放后的时长。运动补偿模式处理 5 秒镜头通常需要数十秒，请耐心等待。
+            </p>
+          </div>
+          <footer class="dialog-foot">
+            <button class="btn" :disabled="slowMoDialog.busy" @click="closeSlowMoDialog">{{ t('common.cancel') }}</button>
+            <button class="btn btn-primary" :disabled="slowMoDialog.busy" @click="confirmSlowMo">
+              <Loader2 v-if="slowMoDialog.busy" :size="12" class="animate-spin" />
+              {{ slowMoDialog.busy ? '光流补帧处理中…' : '开始慢放' }}
+            </button>
           </footer>
         </div>
       </div>
@@ -1764,6 +1885,16 @@ import {
   aspectRatioToImageSize,
   buildStoryboardKeyframePrompt,
 } from '~/components/canvas/keyframeCapabilities'
+import {
+  resolveTurboDraftPlan,
+  resolveHdRefinePlan,
+  SLOW_MOTION_PRESETS,
+  hasDialogueLipSyncRisk,
+  hasPromptVoiceMentions,
+  isTaskDraftVideo,
+  isTaskSlowMotionVideo,
+  parseTaskParamsSafe,
+} from '~/components/canvas/costSavingCapabilities'
 
 definePageMeta({ layout: 'studio' })
 
@@ -1775,6 +1906,16 @@ const episodeNumber = Number(route.params.episodeNumber)
 
 const drama = ref(null), episode = ref(null), chars = ref([]), scenes = ref([]), propItems = ref([]), sbs = ref([]), mergeData = ref(null)
 const authOn = ref(false)
+// 后端是否配置了 PUBLIC_BASE_URL：决定高清精制能否把本地草稿视频作为 V2V 参考直传云端模型
+const publicBaseUrlConfigured = ref(false)
+// 省流制片：极速草稿开关（显式开启才会降档/切换轻量模型，状态记忆在本机浏览器）
+const DRAFT_MODE_STORE_KEY = 'huobao:workbench:draft-mode'
+const draftModeOn = ref((() => {
+  try { return localStorage.getItem(DRAFT_MODE_STORE_KEY) === '1' } catch { return false }
+})())
+watch(draftModeOn, (val) => {
+  try { localStorage.setItem(DRAFT_MODE_STORE_KEY, val ? '1' : '0') } catch {}
+})
 async function logout() {
   try { await authAPI.logout(); location.assign('/login') }
   catch { toast.error('退出未完成，请检查网络后重试') }
@@ -2266,7 +2407,10 @@ function handleImageViewerKeydown(event) {
 
 onMounted(() => {
   window.addEventListener('keydown', handleImageViewerKeydown)
-  authAPI.status().then(s => { authOn.value = Boolean(s?.enabled) }).catch(() => {})
+  authAPI.status().then(s => {
+    authOn.value = Boolean(s?.enabled)
+    publicBaseUrlConfigured.value = Boolean(s?.public_base_url_configured)
+  }).catch(() => {})
 })
 
 onBeforeUnmount(() => {
@@ -2376,11 +2520,13 @@ function videoTaskStatusLabel(sb) {
 
 function videoTaskActionLabel(sb) {
   if (canRecoverVideo(sb?.id)) return t('episode.recovery.restore')
-  if (latestVideoTask(sb?.id)?.status === 'failed') return t('episode.recovery.newGeneration')
+  // 极速草稿开启时在「会真正发起新生成」的按钮上显式标注，避免误以为是正式档位
+  const draftMark = draftModeOn.value ? '⚡ 草稿·' : ''
+  if (latestVideoTask(sb?.id)?.status === 'failed') return draftMark + t('episode.recovery.newGeneration')
   const state = videoTaskState(sb)
-  if (state === 'done') return t('episode.asset.regen')
+  if (state === 'done') return draftMark + t('episode.asset.regen')
   if (state === 'pending') return t('episode.asset.generating')
-  return t('episode.asset.generate')
+  return draftMark + t('episode.asset.generate')
 }
 
 const allVideoTaskRows = computed(() => sbs.value.map((sb, index) => {
@@ -3462,9 +3608,21 @@ async function setAsMainVideo() {
   const sb = selectedSb.value
   if (!sb || !previewVideoUrl.value || playerIsRemote.value) return
   try {
-    await storyboardAPI.update(sb.id, { video_url: previewVideoUrl.value })
+    // 在慢放版本与原速版本之间切换时同步分镜时长，避免时长与实际成片不一致导致后续重出按错误时长计费
+    const target = sbVideoHistory.value.find(item => sameMediaPath(taskVideoPath(item), previewVideoUrl.value))
+    const takeSeconds = Math.round(Number(parseTaskParamsSafe(target).duration) || 0)
+    const crossesSlowMo = isTaskSlowMotionVideo(target) || isTaskSlowMotionVideo(currentVideoTask(sb))
+    const syncDuration = crossesSlowMo && takeSeconds >= 1 && takeSeconds !== Number(sb.duration)
+    await storyboardAPI.update(sb.id, {
+      video_url: previewVideoUrl.value,
+      ...(syncDuration ? { duration: takeSeconds } : {}),
+    })
     sb.video_url = previewVideoUrl.value
     sb.videoUrl = previewVideoUrl.value
+    if (syncDuration) {
+      sb.duration = takeSeconds
+      toast.info(`分镜时长已同步为该版本的 ${takeSeconds}s`)
+    }
     toast.success(t('episode.vid.setMainDone'))
   } catch (e) { toastError(e, { fallback: 'episode.vid.setMainFailed' }) }
 }
@@ -4015,8 +4173,103 @@ async function extractSelfLastFrame(storyboard) {
   }
 }
 
+// ===== 省流制片套件：极速草稿 / 草稿→高清精制 / 光流升格慢放 =====
+const VIDEO_PROMPT_SLOT = '__HB_PROMPT_SLOT__'
+
+function sameMediaPath(a, b) {
+  if (!a || !b) return false
+  return String(a).replace(/^\/+/, '') === String(b).replace(/^\/+/, '')
+}
+
+// 当前分镜主成片对应的 sys_task 记录（用于识别草稿 / 慢放 / 精制版本）
+function currentVideoTask(sb) {
+  const cur = getVideoUrl(sb)
+  if (!cur || !sb?.id) return null
+  return genTasks.value
+    .filter(task => task.type === 'video' && task.storyboard_id === sb.id && task.status === 'completed')
+    .sort((a, b) => b.id - a.id)
+    .find(task => sameMediaPath(taskVideoPath(task), cur)) || null
+}
+
+// 版本类型徽章：草稿 / 慢放 / 原速归档 / 高清精制；普通成片返回 null
+function videoTakeKind(task) {
+  if (!task) return null
+  const p = parseTaskParamsSafe(task)
+  if (isTaskSlowMotionVideo(task)) {
+    return {
+      key: 'slowmo',
+      text: p.speed ? `慢放 ${p.speed}x` : '慢放',
+      title: `FFmpeg 光流升格慢放${p.speed ? ` ${p.speed}x` : ''}${p.fps ? ` · ${p.fps}fps` : ''}（0 算力点，由原速成片派生）`,
+    }
+  }
+  if (p.archivedBeforeSlowMotion) return { key: 'origin', text: '原速', title: '慢放前的原速成片归档，可随时切回' }
+  if (isTaskDraftVideo(task)) return { key: 'draft', text: '草稿', title: '极速草稿试拍版本（低分辨率/轻量模型），满意后可高清精制' }
+  if (p.sourceDraftTaskId) return { key: 'hd', text: '精制', title: `由草稿任务 #${p.sourceDraftTaskId} 高清精制而来` }
+  return null
+}
+
+function turboPlanFor(sb) {
+  return resolveTurboDraftPlan({
+    provider: selectedVideoConfig.value?.provider,
+    model: bareModelName(videoModel.value) || effectiveVideoModelLabel.value,
+    episodeResolution: episodeResolution.value,
+    duration: Number(sb?.duration || 10),
+    hasVoiceReference: hasPromptVoiceMentions(sb?.video_prompt || sb?.videoPrompt),
+    hasTailFrame: preferKeyframesInVideo.value && !!(sb?.last_frame_image || sb?.lastFrameImage),
+    // 按「全部已绑定参考图」保守判定：只要镜头带参考图就不切换到不支持参考图的轻量模型，杜绝因降档而丢图
+    refImageCount: sb ? getShotReferenceImages(sb).length : 0,
+  })
+}
+const activeTurboPlan = computed(() => {
+  if (!draftModeOn.value) return null
+  const sb = selectedSb.value || sbs.value[0]
+  return sb ? turboPlanFor(sb) : null
+})
+const batchTurboPlan = computed(() => {
+  if (!draftModeOn.value) return null
+  const first = batchVideoConfirm.value.targets[0]
+  return first ? turboPlanFor(first) : null
+})
+
+async function submitVideoTask(sb, params, { silent = false, forceNew = false, successMessage = '', successDescription = '' } = {}) {
+  try {
+    delete failedVideoMessages.value[sb.id]
+    if (!isPendingVideo(sb.id)) pendingVideoIds.value.push(sb.id)
+    const generation = await taskAPI.generate({ type: 'video', ...params, force_new: !!forceNew })
+    if (!silent) {
+      toast.success(successMessage || t('episode.vid.generating'), successDescription ? { description: successDescription } : undefined)
+    }
+    await refresh()
+    pollVideoGeneration(generation?.id, sb.id)
+    return generation
+  } catch (e) {
+    pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== sb.id)
+    failedVideoMessages.value = {
+      ...failedVideoMessages.value,
+      [sb.id]: e.message || t('episode.vid.genFailed'),
+    }
+    toastError(e, { fallback: 'episode.vid.genFailed' })
+    return null
+  }
+}
+
 async function genVid(sb, opts = {}) {
-  const localComfy = selectedVideoConfig.value?.provider === 'comfyui'
+  const provider = selectedVideoConfig.value?.provider
+  const localComfy = provider === 'comfyui'
+
+  // 慢放会把分镜时长同步为扩展后的时长：直接重出会按更长时长计费，必须显式确认，批量时跳过
+  const currentTask = currentVideoTask(sb)
+  if (isTaskSlowMotionVideo(currentTask)) {
+    const sourceSeconds = Math.round(Number(parseTaskParamsSafe(currentTask).sourceDuration || 0))
+    if (sourceSeconds && sourceSeconds !== Number(sb.duration)) {
+      if (opts.silent) {
+        toast.warning(`镜头「${sb.title || sb.description?.slice(0, 12) || '#' + sb.id}」当前为慢放版本（时长已由 ${sourceSeconds}s 扩展为 ${sb.duration}s），已跳过批量重出；请先「还原原速」或单独重出`)
+        return
+      }
+      if (!window.confirm(`当前成片为光流慢放版本，分镜时长已由原始 ${sourceSeconds}s 扩展为 ${sb.duration}s。\n\n继续将按 ${sb.duration}s 重新生成并计费。\n如需按原始 ${sourceSeconds}s 生成，请取消并先点击「还原原速」。`)) return
+    }
+  }
+
   if (localComfy && (Number(sb.duration || 10) < 2 || Number(sb.duration || 10) > 5)) {
     toast.error('本地 Wan 2.2 仅支持 2–5 秒静音镜头，请先将分镜时长调整为 2–5 秒。')
     return
@@ -4027,17 +4280,21 @@ async function genVid(sb, opts = {}) {
   if (forceNew && !window.confirm(t('episode.recovery.confirmNew'))) return
 
   const boundReferenceImages = getShotReferenceImages(sb)
-  const activeModelName = bareModelName(videoModel.value) || effectiveVideoModelLabel.value
+  const baseModelName = bareModelName(videoModel.value) || effectiveVideoModelLabel.value
+  // 极速草稿：仅在开关显式开启时生效；模型/分辨率的任何变化都通过徽章与提示告知
+  const turboPlan = (opts.draft ?? draftModeOn.value) ? turboPlanFor(sb) : null
+  const activeModelName = turboPlan?.model || baseModelName
+  const activeResolution = turboPlan?.resolution || episodeResolution.value
   let built
   try {
     built = buildVideoKeyframePayload({
       storyboard: sb,
-      basePrompt: '__HB_PROMPT_SLOT__',
+      basePrompt: VIDEO_PROMPT_SLOT,
       boundReferenceImages,
       refLimit: refImageLimit.value,
-      provider: selectedVideoConfig.value?.provider,
+      provider,
       model: activeModelName,
-      resolution: episodeResolution.value,
+      resolution: activeResolution,
       preferKeyframes: preferKeyframesInVideo.value,
     })
   } catch (capErr) {
@@ -4046,7 +4303,7 @@ async function genVid(sb, opts = {}) {
   }
 
   const resolvedUserPrompt = resolveVideoPromptRefs(sb, built.reference_image_urls)
-  let finalPrompt = built.prompt.replace('__HB_PROMPT_SLOT__', () => resolvedUserPrompt).trim()
+  let finalPrompt = built.prompt.replace(VIDEO_PROMPT_SLOT, () => resolvedUserPrompt).trim()
   if (!resolvedUserPrompt) finalPrompt = finalPrompt.replace(/。\s*$/, '').trim()
 
   const params = {
@@ -4056,11 +4313,21 @@ async function genVid(sb, opts = {}) {
     duration: Number(sb.duration || 10),
     aspect_ratio: dramaAspectRatio.value,
     generate_audio: !localComfy,
-    model: bareModelName(videoModel.value) || undefined,
+    model: (turboPlan?.swappedModel ? turboPlan.model : bareModelName(videoModel.value)) || undefined,
     config_id: ownerConfigId(videoModelOptions.value, videoModel.value),
     ...(built.first_frame_url ? { first_frame_url: built.first_frame_url } : {}),
     ...(built.last_frame_url ? { last_frame_url: built.last_frame_url } : {}),
     reference_image_urls: built.reference_image_urls,
+  }
+  if (turboPlan) {
+    params.draft_mode = true
+    if (turboPlan.resolution) params.resolution = turboPlan.resolution
+    if (turboPlan.speedTier) params.speed_tier = turboPlan.speedTier
+    if (!localComfy) {
+      // 草稿是否静音交由后端按 #角色音色 引用权威判定（有音色引用必保留音频），前端仅在确认有音色时显式开启
+      if (turboPlan.generateAudio) params.generate_audio = true
+      else delete params.generate_audio
+    }
   }
   if (!params.prompt && !params.reference_image_urls.length && !params.first_frame_url && !params.last_frame_url) {
     toast.error(t('episode.vid.needRefOrPrompt'))
@@ -4069,22 +4336,260 @@ async function genVid(sb, opts = {}) {
   if (built.notice && !opts.silent) {
     toast.info(built.notice)
   }
+  await submitVideoTask(sb, params, {
+    silent: opts.silent,
+    forceNew,
+    successMessage: turboPlan ? `⚡ 极速草稿已提交 · ${turboPlan.summaryBadge}` : '',
+    successDescription: turboPlan ? turboPlan.detailHint : '',
+  })
+}
+
+// ----- 草稿满意 → 高清精制（V2V 参考视频重绘；不支持时抽草稿首尾帧按关键帧重制，绝不复用种子） -----
+const hdRefiningIds = ref([])
+
+function draftTaskForRefine(sb) {
+  const task = currentVideoTask(sb)
+  return isTaskDraftVideo(task) && !isTaskSlowMotionVideo(task) ? task : null
+}
+
+function hdRefinePlanFor(sb) {
+  const draft = draftTaskForRefine(sb)
+  if (!draft) return null
+  return resolveHdRefinePlan({
+    provider: selectedVideoConfig.value?.provider,
+    model: bareModelName(videoModel.value) || effectiveVideoModelLabel.value,
+    episodeResolution: episodeResolution.value,
+    duration: Number(parseTaskParamsSafe(draft).duration || sb.duration || 5),
+    draftVideoUrl: taskVideoPath(draft),
+    publicBaseUrlConfigured: publicBaseUrlConfigured.value,
+    refImageCount: getShotReferenceImages(sb).length,
+  })
+}
+
+function draftUsedImage(draftParams, image) {
+  if (!image) return false
+  if (sameMediaPath(draftParams.firstFrameUrl, image) || sameMediaPath(draftParams.lastFrameUrl, image)) return true
+  let refs = draftParams.referenceImageUrls
+  if (typeof refs === 'string') {
+    try { refs = JSON.parse(refs) } catch { refs = [] }
+  }
+  return Array.isArray(refs) && refs.some(item => sameMediaPath(item, image))
+}
+
+async function hdRefineVideo(sb) {
+  if (!sb?.id || isPendingVideo(sb.id) || hdRefiningIds.value.includes(sb.id)) return
+  const draft = draftTaskForRefine(sb)
+  const plan = hdRefinePlanFor(sb)
+  if (!draft || !plan) {
+    toast.error('当前主成片不是极速草稿版本，无需高清精制；如需更高画质请关闭「极速草稿」后直接重出视频')
+    return
+  }
+  const provider = selectedVideoConfig.value?.provider
+  const localComfy = provider === 'comfyui'
+  const draftParams = parseTaskParamsSafe(draft)
+  const draftPath = taskVideoPath(draft)
+  const duration = plan.durationOverride ?? Number(draftParams.duration || sb.duration || 5)
+  if (localComfy && (duration < 2 || duration > 5)) {
+    toast.error('本地 Wan 2.2 仅支持 2–5 秒静音镜头，请先将分镜时长调整为 2–5 秒。')
+    return
+  }
+
+  const confirmLines = [
+    plan.description,
+    plan.notice,
+    `精制目标：${plan.model || effectiveVideoModelLabel.value || '默认模型'} · ${plan.resolution} · ${duration}s`,
+    '高清精制按正式档位计费；草稿版本会保留在历史记录中，可随时切回。',
+  ].filter(Boolean)
+  if (!window.confirm(confirmLines.join('\n\n'))) return
+
+  hdRefiningIds.value = [...hdRefiningIds.value, sb.id]
   try {
-    delete failedVideoMessages.value[sb.id]
-    if (!isPendingVideo(sb.id)) pendingVideoIds.value.push(sb.id)
-    const generation = await taskAPI.generate({ type: 'video', ...params, force_new: !!forceNew })
-    if (!opts.silent) toast.success(t('episode.vid.generating'))
-    await refresh()
-    pollVideoGeneration(generation?.id, sb.id)
-  } catch (e) {
-    pendingVideoIds.value = pendingVideoIds.value.filter(item => item !== sb.id)
-    failedVideoMessages.value = {
-      ...failedVideoMessages.value,
-      [sb.id]: e.message || t('episode.vid.genFailed'),
+    const boundReferenceImages = getShotReferenceImages(sb)
+    const lockedFirst = (sb.first_frame_image || sb.firstFrameImage || '').trim()
+    const lockedLast = (sb.last_frame_image || sb.lastFrameImage || '').trim()
+    const extra = {}
+    let promptPrefix = ''
+    let built
+
+    if (plan.strategy === 'v2v_reference') {
+      // 草稿视频作为动作参考；首尾帧仅在「关键帧并入参考图」的多模态模型上保留，其余模型不可与参考视频混传
+      const cap = getVideoKeyframeCapability(provider, plan.model, plan.resolution)
+      const keepKeyframes = cap.mode === 'refs_only' && preferKeyframesInVideo.value
+      built = buildVideoKeyframePayload({
+        storyboard: sb,
+        basePrompt: VIDEO_PROMPT_SLOT,
+        boundReferenceImages,
+        refLimit: refImageLimit.value,
+        provider,
+        model: plan.model,
+        resolution: plan.resolution,
+        preferKeyframes: keepKeyframes,
+      })
+      extra.reference_video_urls = [draftPath]
+      promptPrefix = '参考视频为已确认的低清试拍样片：请严格保持其构图、角色动作、运镜节奏与镜头时序，以更高清晰度与更丰富的细节重新渲染。'
+      if (!keepKeyframes && preferKeyframesInVideo.value && (lockedFirst || lockedLast)) {
+        toast.info('V2V 精制以草稿视频作为动作与构图参考，当前模型不支持同时传首尾帧，本次不单独发送已锁定的关键帧')
+      }
+    } else {
+      // 关键帧重制：优先沿用草稿生成时已使用的高清锁定帧，否则从草稿视频抽帧（不改写分镜已锁定的关键帧）
+      const needLast = plan.strategy !== 'keyframe_first'
+      const extract = async (position) => {
+        const res = await storyboardAPI.extractFrame(sb.id, { position, source_video_url: draftPath, apply_to: 'none' })
+        if (!res?.path) throw new Error('抽取草稿关键帧失败，请确认草稿视频已保存到本地后重试')
+        return res.path
+      }
+      const firstFrame = draftUsedImage(draftParams, lockedFirst) ? lockedFirst : await extract('first')
+      const lastFrame = !needLast ? '' : (draftUsedImage(draftParams, lockedLast) ? lockedLast : await extract('last'))
+      if (plan.strategy === 'extracted_refs') {
+        const frameSlots = new Set([firstFrame, lastFrame].filter(Boolean)).size
+        const others = boundReferenceImages.filter(item => item !== firstFrame && item !== lastFrame).length
+        if (frameSlots + others > refImageLimit.value) {
+          throw new Error(`高清精制需占用 ${frameSlots} 个参考图位放置草稿首尾关键帧，当前镜头另绑定了 ${others} 张参考图，超出该模型上限 ${refImageLimit.value} 张；请先精简绑定素材后重试`)
+        }
+      }
+      built = buildVideoKeyframePayload({
+        storyboard: {
+          ...sb,
+          first_frame_image: firstFrame,
+          firstFrameImage: firstFrame,
+          last_frame_image: lastFrame,
+          lastFrameImage: lastFrame,
+        },
+        basePrompt: VIDEO_PROMPT_SLOT,
+        boundReferenceImages,
+        refLimit: refImageLimit.value,
+        provider,
+        model: plan.model,
+        resolution: plan.resolution,
+        preferKeyframes: true,
+      })
     }
-    toastError(e, { fallback: 'episode.vid.genFailed' })
+
+    const resolvedUserPrompt = resolveVideoPromptRefs(sb, built.reference_image_urls)
+    let finalPrompt = built.prompt.replace(VIDEO_PROMPT_SLOT, () => resolvedUserPrompt).trim()
+    if (!resolvedUserPrompt) finalPrompt = finalPrompt.replace(/。\s*$/, '').trim()
+    if (promptPrefix) finalPrompt = `${promptPrefix}${finalPrompt}`
+
+    const params = {
+      storyboard_id: sb.id,
+      drama_id: dramaId,
+      prompt: finalPrompt,
+      duration,
+      aspect_ratio: dramaAspectRatio.value,
+      generate_audio: !localComfy,
+      model: plan.model || bareModelName(videoModel.value) || undefined,
+      config_id: ownerConfigId(videoModelOptions.value, videoModel.value),
+      resolution: plan.resolution,
+      ...(plan.speedTier ? { speed_tier: plan.speedTier } : {}),
+      ...(built.first_frame_url ? { first_frame_url: built.first_frame_url } : {}),
+      ...(built.last_frame_url ? { last_frame_url: built.last_frame_url } : {}),
+      reference_image_urls: built.reference_image_urls,
+      ...extra,
+      source_draft_task_id: draft.id,
+    }
+    if (built.notice) toast.info(built.notice)
+    await submitVideoTask(sb, params, {
+      forceNew: latestVideoTask(sb.id)?.status === 'failed',
+      successMessage: '💎 高清精制已提交',
+      successDescription: '完成后自动替换为主成片，草稿版本保留在历史记录中',
+    })
+  } catch (e) {
+    toastError(e)
+  } finally {
+    hdRefiningIds.value = hdRefiningIds.value.filter(id => id !== sb.id)
   }
 }
+
+// ----- FFmpeg 光流升格慢放（显式逐镜头操作，0 算力点；对白/口型镜头强提醒） -----
+const SLOW_MO_CLOSED = { open: false, storyboard: null, speed: 0.5, mode: 'optical_flow', keepAudio: false, busy: false }
+const slowMoDialog = ref({ ...SLOW_MO_CLOSED })
+const slowMoRisk = computed(() => hasDialogueLipSyncRisk(slowMoDialog.value.storyboard))
+// 当前成片若已是慢放版本，则基于其原速片源重新慢放，避免「慢放再慢放」叠加补帧导致画质劣化
+const slowMoSource = computed(() => {
+  const sb = slowMoDialog.value.storyboard
+  if (!sb) return { path: '', seconds: 0, fromOriginal: false }
+  const task = currentVideoTask(sb)
+  if (isTaskSlowMotionVideo(task)) {
+    const p = parseTaskParamsSafe(task)
+    if (p.sourceVideo) {
+      return { path: p.sourceVideo, seconds: Number(p.sourceDuration) || 0, fromOriginal: true, previousSpeed: p.speed }
+    }
+  }
+  return { path: '', seconds: Number(sb.duration) || 0, fromOriginal: false }
+})
+const slowMoEstimatedSeconds = computed(() => {
+  const base = slowMoSource.value.seconds
+  const speed = Number(slowMoDialog.value.speed) || 0.5
+  return base ? (base / speed).toFixed(1) : ''
+})
+
+function openSlowMoDialog(sb) {
+  if (!sb?.id) return
+  const url = getVideoUrl(sb)
+  if (!url) { toast.error('当前镜头尚未生成视频，无法执行光流慢放'); return }
+  if (/^https?:\/\//i.test(url)) { toast.error('当前成片为远程地址，请先保存到本地后再执行光流慢放'); return }
+  if (isPendingVideo(sb.id)) { toast.error('该镜头正在生成视频，请等待完成后再慢放'); return }
+  slowMoDialog.value = { ...SLOW_MO_CLOSED, open: true, storyboard: sb }
+}
+
+function closeSlowMoDialog() {
+  if (slowMoDialog.value.busy) return
+  slowMoDialog.value = { ...SLOW_MO_CLOSED }
+}
+
+async function confirmSlowMo() {
+  const dialog = slowMoDialog.value
+  const sb = dialog.storyboard
+  if (!sb?.id || dialog.busy) return
+  if (slowMoRisk.value && !window.confirm('检测到该镜头含对白 / 口型 / 角色音色引用：\n慢放会让口型与语速同步变慢，观感明显失真。\n\n光流慢放更适合空镜、景物、情绪特写等无对白镜头。仍要继续吗？')) return
+  const source = slowMoSource.value
+  slowMoDialog.value = { ...dialog, busy: true }
+  try {
+    const res = await storyboardAPI.slowMotion(sb.id, {
+      speed: Number(dialog.speed),
+      fps: 24,
+      mode: dialog.mode,
+      mute_audio: !dialog.keepAudio,
+      apply: true,
+      ...(source.path ? { source_video_url: source.path } : {}),
+    })
+    const from = Number(res?.source_duration)
+    const to = Number(res?.duration)
+    toast.success(
+      `光流慢放完成${from && to ? `：${from.toFixed(1)}s → ${to.toFixed(1)}s` : ''}（${res?.speed}x · ${res?.fps}fps · 0 算力点）`,
+      { description: `分镜时长已同步为 ${res?.storyboard_duration}s；原速版本保留在历史记录中，可随时「还原原速」` },
+    )
+    slowMoDialog.value = { ...SLOW_MO_CLOSED }
+    await refresh()
+    await loadGenTasks()
+    await loadSbVideoHistory()
+  } catch (e) {
+    slowMoDialog.value = { ...slowMoDialog.value, busy: false }
+    toastError(e)
+  }
+}
+
+async function restoreOriginalSpeed(sb) {
+  const task = currentVideoTask(sb)
+  if (!sb?.id || !isTaskSlowMotionVideo(task)) return
+  const p = parseTaskParamsSafe(task)
+  if (!p.sourceVideo) { toast.error('未找到该慢放版本对应的原速片源，请在历史记录中手动切换'); return }
+  const seconds = Math.round(Number(p.sourceDuration) || 0)
+  try {
+    await storyboardAPI.update(sb.id, {
+      video_url: p.sourceVideo,
+      ...(seconds >= 1 ? { duration: seconds } : {}),
+    })
+    toast.success(`已还原为原速成片${seconds >= 1 ? `（分镜时长恢复为 ${seconds}s）` : ''}，慢放版本仍保留在历史记录中`)
+    await refresh()
+    await loadSbVideoHistory()
+  } catch (e) {
+    toastError(e)
+  }
+}
+
+const selectedVideoKind = computed(() => videoTakeKind(currentVideoTask(selectedSb.value)))
+const selectedHdPlan = computed(() => selectedSb.value ? hdRefinePlanFor(selectedSb.value) : null)
 async function pollVideoGeneration(generationId, storyboardId) {
   if (!generationId) {
     watchAsyncResult(() => {
@@ -7152,5 +7657,181 @@ button.video-task-metric.on { box-shadow: 0 0 0 2px var(--accent); }
 .kf-mini-btn.is-accent {
   border-color: rgba(59, 130, 246, 0.32);
   color: var(--accent-text, var(--accent));
+}
+
+/* ===== 省流制片套件：极速草稿 / 高清精制 / 光流慢放 ===== */
+.draft-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.16s, color 0.16s, border-color 0.16s;
+}
+
+.draft-mode-toggle input {
+  accent-color: var(--warning);
+  margin: 0;
+}
+
+.draft-mode-toggle:hover {
+  color: var(--text-0);
+}
+
+.draft-mode-toggle.on {
+  background: var(--warning-bg);
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.draft-mode-plan {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-weight: 650;
+  cursor: help;
+}
+
+.cost-suite-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px 0;
+}
+
+.cost-suite-hd {
+  border-color: var(--info);
+  color: var(--info);
+  font-weight: 650;
+}
+
+.cost-suite-hd:hover:not(:disabled) {
+  background: var(--info-bg);
+}
+
+.take-kind-chip,
+.video-history-kind {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.video-history-kind {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  padding: 0 5px;
+  font-size: 9px;
+  color: #fff;
+}
+
+.take-kind-chip.is-draft { background: var(--warning-bg); color: var(--warning); }
+.take-kind-chip.is-slowmo { background: var(--info-bg); color: var(--info); }
+.take-kind-chip.is-origin { background: var(--bg-2); color: var(--text-2); }
+.take-kind-chip.is-hd { background: var(--success-bg); color: var(--success); }
+
+.video-history-kind.is-draft { background: rgba(217, 119, 6, 0.92); }
+.video-history-kind.is-slowmo { background: rgba(37, 99, 235, 0.92); }
+.video-history-kind.is-origin { background: rgba(0, 0, 0, 0.62); }
+.video-history-kind.is-hd { background: rgba(22, 163, 74, 0.92); }
+
+.batch-video-draft-note {
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.slowmo-dialog {
+  width: 460px;
+}
+
+.slowmo-warning,
+.slowmo-info {
+  padding: 8px 10px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.slowmo-warning {
+  background: var(--error-bg);
+  color: var(--error);
+  font-weight: 600;
+}
+
+.slowmo-info {
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.slowmo-presets {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.slowmo-preset {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text-1);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.slowmo-preset input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.slowmo-preset.on {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--text-0);
+  font-weight: 600;
+}
+
+.slowmo-select {
+  width: auto;
+  max-width: 250px;
+  height: 28px;
+  font-size: 11.5px;
+}
+
+.slowmo-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--text-2);
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.slowmo-check input {
+  margin: 2px 0 0;
+  accent-color: var(--accent);
 }
 </style>

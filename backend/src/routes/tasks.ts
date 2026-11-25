@@ -100,6 +100,9 @@ function normalizeVideoRequest(body: any) {
     seed: body.seed ?? parameters.seed,
     prompt_extend: body.prompt_extend ?? parameters.prompt_extend,
     watermark: body.watermark ?? parameters.watermark,
+    draft_mode: body.draft_mode === true,
+    speed_tier: body.speed_tier ?? parameters.tier,
+    source_draft_task_id: body.source_draft_task_id != null ? Number(body.source_draft_task_id) : undefined,
     official_media: media,
   }
 }
@@ -136,6 +139,7 @@ function validateVideoRequest(body: any, provider?: string): string | null {
   if (provider === 'nihapi') {
     if (!String(body.prompt || '').trim()) return '视频提示词不能为空'
     if (body.model && !nihapiVideoProfiles[body.model]) return '尚未适配该 NIH API 视频模型'
+    if (body.speed_tier && !['fast', 'standard'].includes(body.speed_tier)) return 'NIH API speed_tier 仅支持 fast 或 standard'
     // Model-specific validation happens after local references are resolved.
     return null
   }
@@ -239,7 +243,7 @@ app.post('/', async (c) => {
         const [ep] = await db.select().from(schema.episodes).where(eq(schema.episodes.id, sb.episodeId))
         const locked = type === 'image' ? ep?.imageConfigId : ep?.videoConfigId
         if (locked != null && configId == null) configId = locked
-        if (type === 'video' && ep?.resolution) episodeResolution = ep.resolution
+        if (type === 'video' && ep?.resolution && !videoBody?.draft_mode && !videoBody?.source_draft_task_id) episodeResolution = ep.resolution
         storyboardDramaId = ep?.dramaId ?? undefined
       }
     }
@@ -257,6 +261,17 @@ app.post('/', async (c) => {
       const effectiveConfig = configId
         ? (await getConfigById(configId)) ?? await getActiveConfig('video')
         : await getActiveConfig('video')
+      const effProvider = (effectiveConfig?.provider || '').toLowerCase()
+      const effModel = videoBody.model || effectiveConfig?.model || ''
+      if (videoBody.draft_mode && !videoBody.resolution) {
+        if (effProvider === 'nihapi') {
+          const p = nihapiVideoProfiles[effModel]
+          if (p?.resolutions?.includes('480p')) videoBody.resolution = '480p'
+          else if (p?.resolutions?.length) videoBody.resolution = p.resolutions[0]
+        } else {
+          videoBody.resolution = '480p'
+        }
+      }
       if (effectiveConfig?.provider === 'grok') {
         videoBody.model ||= effectiveConfig.model
         videoBody.resolution ||= episodeResolution
@@ -266,6 +281,9 @@ app.post('/', async (c) => {
       const voices = await resolveStoryboardVoiceReferences(String(videoBody.prompt || ''), Number(body.storyboard_id) || undefined, videoBody.reference_audio_urls)
       videoBody.prompt = voices.prompt
       videoBody.reference_audio_urls = voices.audioUrls
+      if (videoBody.draft_mode && videoBody.generate_audio === undefined && !voices.hasVoiceReferences && effProvider !== 'comfyui') {
+        videoBody.generate_audio = false
+      }
       if (voices.hasVoiceReferences && videoBody.generate_audio === false) return badRequest(c, '引用角色音色时需要开启视频声音')
       const referenceError = validateVideoRequest(videoBody, effectiveConfig?.provider)
       if (referenceError) return badRequest(c, referenceError)
@@ -310,6 +328,8 @@ app.post('/', async (c) => {
         size: body.size,
         referenceImages: body.reference_images,
         frameType: body.frame_type,
+        draftMode: body.draft_mode === true,
+        steps: body.steps != null ? Number(body.steps) : undefined,
         configId,
       })
       : await generateVideo({
@@ -334,6 +354,9 @@ app.post('/', async (c) => {
         seed: videoBody!.seed,
         promptExtend: videoBody!.prompt_extend,
         watermark: videoBody!.watermark,
+        draftMode: videoBody!.draft_mode === true,
+        speedTier: videoBody!.speed_tier,
+        sourceDraftTaskId: videoBody!.source_draft_task_id,
         configId,
       })
 

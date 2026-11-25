@@ -83,6 +83,7 @@ export function applyTeamInvitationInTx(userId: number, rawCode: string): number
 app.get('/status', (c) => {
   const enabled = authEnabled()
   const policy = getAuthBillingSettings()
+  const publicBaseUrlConfigured = Boolean((process.env.PUBLIC_BASE_URL || '').trim())
   if (!enabled) {
     return success(c, {
       enabled: false,
@@ -90,6 +91,7 @@ app.get('/status', (c) => {
       allow_open_register: false,
       allow_invite_register: false,
       billing_enabled: false,
+      public_base_url_configured: publicBaseUrlConfigured,
     })
   }
 
@@ -103,6 +105,7 @@ app.get('/status', (c) => {
       allow_invite_register: policy.allowInviteRegister,
       register_bonus_credits: policy.registerBonusCredits,
       billing_enabled: policy.billingEnabled,
+      public_base_url_configured: publicBaseUrlConfigured,
     })
   }
 
@@ -133,6 +136,7 @@ app.get('/status', (c) => {
     allow_open_register: policy.allowOpenRegister,
     allow_invite_register: policy.allowInviteRegister,
     billing_enabled: policy.billingEnabled,
+    public_base_url_configured: publicBaseUrlConfigured,
     user: {
       id: actor.user.id,
       username: actor.user.username,

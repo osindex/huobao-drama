@@ -5,6 +5,8 @@ import { success, created, now, badRequest } from '../utils/response.js'
 import { toSnakeCase } from '../utils/transform.js'
 import { getAbsolutePath } from '../utils/storage.js'
 import { extractVideoFrame } from '../utils/video-frame.js'
+import { slowMotionVideo } from '../utils/video-slowmo.js'
+import { getRequestActor } from '../services/auth.js'
 import { checkEpisodeIdAccess, checkStoryboardIdAccess, respondAccessDenied } from '../services/team-access.js'
 import { logTaskError, logTaskPayload, logTaskStart, logTaskSuccess } from '../utils/task-logger.js'
 
@@ -283,6 +285,148 @@ app.post('/:id/extract-frame', async (c) => {
     })
   } catch (err: any) {
     logTaskError('StoryboardAPI', 'extract-frame', { storyboardId: id, error: err.message })
+    return badRequest(c, err.message)
+  }
+})
+
+// POST /storyboards/:id/slow-motion — FFmpeg 运动补偿光流升格慢放扩时长（0算力消耗，显式操作）
+app.post('/:id/slow-motion', async (c) => {
+  const id = Number(c.req.param('id'))
+  const access = checkStoryboardIdAccess(id, 'write')
+  if (!access.ok) return respondAccessDenied(c, access)
+  const storyboard = access.storyboard!
+
+  const body = await c.req.json().catch(() => ({}))
+  const speed = body.speed !== undefined ? Number(body.speed) : 0.5
+  const fps = body.fps !== undefined ? Number(body.fps) : 24
+  const mode = body.mode === 'blend' ? 'blend' : 'optical_flow'
+  const muteAudio = body.mute_audio !== false
+  const apply = body.apply !== false
+
+  try {
+    const sourceVideo = body.source_video_url
+      ? normalizeMediaSlotValue(body.source_video_url)
+      : storyboard.videoUrl
+    if (!sourceVideo) {
+      return badRequest(c, '当前分镜尚未生成本地视频，无法执行光流慢放')
+    }
+
+    logTaskStart('StoryboardAPI', 'slow-motion', {
+      storyboardId: id,
+      sourceVideo,
+      speed,
+      fps,
+      mode,
+      muteAudio,
+    })
+
+    const result = await slowMotionVideo(sourceVideo, {
+      speed,
+      fps,
+      mode,
+      muteAudio,
+    })
+
+    const actor = getRequestActor()
+    const teamId = actor?.team.id ?? access.drama?.teamId ?? null
+    const userId = actor?.user.id ?? null
+    const dramaId = access.drama?.id ?? null
+    const ts = now()
+
+    // 确保慢放前的原速视频也在 sys_task 历史版本中可回退（非破坏性归档）
+    const existingTasks = await db.select().from(schema.sysTask)
+      .where(eq(schema.sysTask.storyboardId, id))
+    const hasOriginalInHistory = existingTasks.some(t =>
+      t.type === 'video' && t.status === 'completed' && (t.localPath === sourceVideo || t.resultUrl === sourceVideo),
+    )
+    if (!hasOriginalInHistory) {
+      const archiveTs = new Date(Date.now() - 1000).toISOString()
+      await db.insert(schema.sysTask).values({
+        type: 'video',
+        storyboardId: id,
+        dramaId,
+        teamId,
+        userId,
+        provider: 'local',
+        model: 'original-1.0x',
+        prompt: storyboard.videoPrompt || storyboard.description || '原速成片归档',
+        stage: 'completed',
+        status: 'completed',
+        localPath: sourceVideo,
+        frozenCredits: 0,
+        settledCredits: 0,
+        billingStatus: 'none',
+        params: JSON.stringify({ archivedBeforeSlowMotion: true, duration: storyboard.duration }),
+        completedAt: archiveTs,
+        createdAt: archiveTs,
+        updatedAt: archiveTs,
+      })
+    }
+
+    const taskRes = await db.insert(schema.sysTask).values({
+      type: 'video',
+      storyboardId: id,
+      dramaId,
+      teamId,
+      userId,
+      provider: 'ffmpeg',
+      model: mode === 'blend' ? 'minterpolate-blend' : 'minterpolate-mci',
+      prompt: `[光流慢放 ${result.speed}x · ${result.fps}fps] ${storyboard.videoPrompt || storyboard.description || ''}`.trim(),
+      stage: 'completed',
+      status: 'completed',
+      localPath: result.path,
+      frozenCredits: 0,
+      settledCredits: 0,
+      billingStatus: 'none',
+      params: JSON.stringify({
+        slowMotion: true,
+        speed: result.speed,
+        fps: result.fps,
+        mode: result.mode,
+        muteAudio,
+        sourceVideo,
+        sourceDuration: result.sourceDuration,
+        duration: result.duration,
+      }),
+      completedAt: ts,
+      createdAt: ts,
+      updatedAt: ts,
+    }).run()
+
+    const newRoundedDuration = Math.max(2, Math.min(60, Math.round(result.duration)))
+    if (apply) {
+      await db.update(schema.storyboards)
+        .set({
+          videoUrl: result.path,
+          duration: newRoundedDuration,
+          updatedAt: ts,
+        })
+        .where(eq(schema.storyboards.id, id))
+    }
+
+    logTaskSuccess('StoryboardAPI', 'slow-motion', {
+      storyboardId: id,
+      path: result.path,
+      duration: result.duration,
+      speed: result.speed,
+      fps: result.fps,
+      mode: result.mode,
+    })
+
+    return success(c, {
+      task_id: getInsertId(taskRes),
+      path: result.path,
+      url: `/${result.path}`,
+      duration: result.duration,
+      storyboard_duration: apply ? newRoundedDuration : storyboard.duration,
+      source_duration: result.sourceDuration,
+      speed: result.speed,
+      fps: result.fps,
+      mode: result.mode,
+      applied: apply,
+    })
+  } catch (err: any) {
+    logTaskError('StoryboardAPI', 'slow-motion', { storyboardId: id, error: err.message })
     return badRequest(c, err.message)
   }
 })

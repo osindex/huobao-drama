@@ -75,13 +75,20 @@ def image_graph(record, refs):
         raise ValueError('图像尺寸需为 256–2048，实际输出按比例限制到约一百万像素')
     scale = min(1, (1048576 / (w * h)) ** .5)
     w, h = max(256, round(w * scale / 16) * 16), max(256, round(h * scale / 16) * 16)
+    raw_steps = record.get('steps')
+    if raw_steps is not None:
+        steps = int(raw_steps)
+        if steps < 6 or steps > 40:
+            raise ValueError('本地生图采样步数需在 6–40 之间')
+    else:
+        steps = 10 if record.get('draftMode') else 20
     g = {
         '1': node('UNETLoader', unet_name='qwen_image_edit_2509_bf16.safetensors' if refs else 'qwen_image_2512_bf16.safetensors', weight_dtype='default'),
         '2': node('CLIPLoader', clip_name='qwen_2.5_vl_7b.safetensors', type='qwen_image'),
         '3': node('VAELoader', vae_name='qwen_image_vae.safetensors'),
         '4': node('ModelSamplingAuraFlow', model=['1', 0], shift=3.1),
         '7': node('EmptySD3LatentImage', width=w, height=h, batch_size=1),
-        '8': node('KSampler', model=['4', 0], seed=secrets.randbelow(2**32), steps=20, cfg=4.0, sampler_name='euler', scheduler='simple', positive=['5', 0], negative=['6', 0], latent_image=['7', 0], denoise=1.0),
+        '8': node('KSampler', model=['4', 0], seed=secrets.randbelow(2**32), steps=steps, cfg=4.0, sampler_name='euler', scheduler='simple', positive=['5', 0], negative=['6', 0], latent_image=['7', 0], denoise=1.0),
         '9': node('VAEDecode', samples=['8', 0], vae=['3', 0]),
         '10': node('SaveImage', images=['9', 0], filename_prefix='huobao/image'),
     }

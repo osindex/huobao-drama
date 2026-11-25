@@ -87,6 +87,8 @@ export function estimateCredits(opts: {
   model?: string | null
   duration?: number | null
   resolution?: string | null
+  draftMode?: boolean | null
+  generateAudio?: boolean | number | null
 }): number {
   const rules = db.select().from(schema.creditPricing)
     .where(eq(schema.creditPricing.serviceType, opts.serviceType))
@@ -115,7 +117,8 @@ export function estimateCredits(opts: {
   if (!bestRule || bestRule.unitCredits <= 0) return 0
 
   if (bestRule.billingUnit === 'per_call' || bestRule.billingUnit === 'per_image') {
-    return Math.max(0, Math.ceil(bestRule.unitCredits))
+    const imgFactor = opts.serviceType === 'image' && opts.draftMode ? 0.8 : 1
+    return Math.max(1, Math.ceil(bestRule.unitCredits * imgFactor))
   }
 
   if (bestRule.billingUnit === 'per_second') {
@@ -131,7 +134,8 @@ export function estimateCredits(opts: {
         }
       } catch {}
     }
-    return Math.max(1, Math.ceil(bestRule.unitCredits * seconds * multiplier))
+    const silentDraftFactor = opts.draftMode && (opts.generateAudio === false || opts.generateAudio === 0) ? 0.75 : 1
+    return Math.max(1, Math.ceil(bestRule.unitCredits * seconds * multiplier * silentDraftFactor))
   }
 
   return Math.max(0, Math.ceil(bestRule.unitCredits))
@@ -148,6 +152,8 @@ export function freezeCreditsInTx(opts: {
   model?: string | null
   duration?: number | null
   resolution?: string | null
+  draftMode?: boolean | null
+  generateAudio?: boolean | number | null
   description: string
 }): number {
   const ts = now()
@@ -169,6 +175,8 @@ export function freezeCreditsInTx(opts: {
     model: opts.model,
     duration: opts.duration,
     resolution: opts.resolution,
+    draftMode: opts.draftMode,
+    generateAudio: opts.generateAudio,
   })
 
   if (amount <= 0) {
@@ -240,13 +248,22 @@ export function settleTaskCredits(taskId: number, actualDuration?: number | null
     let settled = frozen
     if (task.type === 'video' && actualDuration && Number.isFinite(actualDuration) && actualDuration > 0) {
       let resolution: string | null = null
-      try { resolution = task.params ? JSON.parse(task.params)?.resolution || null : null } catch {}
+      let draftMode: boolean | null = null
+      let generateAudio: boolean | number | null = null
+      try {
+        const parsed = task.params ? JSON.parse(task.params) : null
+        resolution = parsed?.resolution || null
+        draftMode = parsed?.draftMode ? true : null
+        generateAudio = parsed?.generateAudio ?? null
+      } catch {}
       const recomputed = estimateCredits({
         serviceType: 'video',
         provider: task.provider || '*',
         model: task.model,
         duration: actualDuration,
         resolution,
+        draftMode,
+        generateAudio,
       })
       if (recomputed > 0 && recomputed < frozen) {
         settled = recomputed

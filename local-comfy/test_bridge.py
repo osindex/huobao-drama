@@ -13,7 +13,12 @@ class BridgeTests(unittest.TestCase):
         self.assertLessEqual(g['7']['inputs']['width']*g['7']['inputs']['height'], 1100000)
         edit, _, _ = bridge.image_graph({'prompt':'edit'}, ['ref.png'])
         self.assertEqual(edit['5']['class_type'], 'TextEncodeQwenImageEditPlus')
+        self.assertEqual(edit['8']['inputs']['steps'], 20)
         self.assertEqual(output, '10')
+        draft, _, _ = bridge.image_graph({'prompt':'draft','draftMode':True}, [])
+        self.assertEqual(draft['8']['inputs']['steps'], 10)
+        with self.assertRaises(ValueError):
+            bridge.image_graph({'prompt':'bad','steps':3}, [])
 
     def test_video_graph(self):
         r = {'prompt':'move','firstFrameUrl':'data:image/png;base64,AA==','duration':5,'resolution':'720p'}

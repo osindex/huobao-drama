@@ -65,6 +65,8 @@ interface GenerateImageParams {
   referenceImages?: string[]
   frameType?: string
   configId?: number
+  draftMode?: boolean
+  steps?: number
   skipBilling?: boolean
   internalTeamId?: number | null
   internalUserId?: number | null
@@ -93,6 +95,9 @@ interface GenerateVideoParams {
   watermark?: boolean
   configId?: number
   forceNew?: boolean
+  draftMode?: boolean
+  speedTier?: 'fast' | 'standard'
+  sourceDraftTaskId?: number
 }
 
 export async function generateImage(params: GenerateImageParams): Promise<number> {
@@ -120,6 +125,8 @@ export async function generateImage(params: GenerateImageParams): Promise<number
     referenceImages: reference?.referenceImages || params.referenceImages,
     referenceAsset: reference?.referenceAsset,
     requireReferenceImages: !!reference || Boolean(params.referenceImages?.length),
+    ...(params.draftMode ? { draftMode: true } : {}),
+    ...(params.steps != null ? { steps: params.steps } : {}),
   }, {
     skipBilling: params.skipBilling,
     internalTeamId: params.internalTeamId,
@@ -185,6 +192,9 @@ export async function generateVideo(params: GenerateVideoParams): Promise<number
       seed: params.seed,
       promptExtend: params.promptExtend,
       watermark: params.watermark,
+      ...(params.draftMode ? { draftMode: true } : {}),
+      ...(params.speedTier ? { speedTier: params.speedTier } : {}),
+      ...(params.sourceDraftTaskId ? { sourceDraftTaskId: params.sourceDraftTaskId } : {}),
     })
 
     logTaskStart('VideoTask', 'enqueue', {
@@ -261,9 +271,11 @@ async function createTask(
         model: effectiveModel,
         duration: type === 'video' ? Number(params.duration || 5) : null,
         resolution: type === 'video' ? String(params.resolution || '720p') : null,
+        draftMode: Boolean(params.draftMode),
+        generateAudio: type === 'video' ? (params.generateAudio as number | boolean | null | undefined) : null,
         description: type === 'image'
-          ? `生图预扣（${config.provider}/${effectiveModel || 'default'}）`
-          : `生视频预扣（${config.provider}/${effectiveModel || 'default'}，${Number(params.duration) || 5}s）`,
+          ? `生图预扣（${config.provider}/${effectiveModel || 'default'}${params.draftMode ? ' · 极速草稿' : ''}）`
+          : `生视频预扣（${config.provider}/${effectiveModel || 'default'}，${Number(params.duration) || 5}s${params.draftMode ? ' · 极速草稿' : ''}）`,
       })
     }
     return taskId
@@ -312,6 +324,8 @@ async function processTask(id: number, config: AIConfig) {
         size: params.size,
         frameType: params.frameType,
         referenceImages: resolvedReferenceImages.length ? JSON.stringify(resolvedReferenceImages) : null,
+        draftMode: params.draftMode,
+        steps: params.steps,
       }))
     } else {
       const adapter = getVideoAdapter(config.provider)
@@ -326,6 +340,7 @@ async function processTask(id: number, config: AIConfig) {
           prompt: `根据参考图片制作一张完整电影分镜画面，保持参考人物的身份和服装。画面要求：${record.prompt}`,
           referenceImages: refs,
           size: params.aspectRatio === '9:16' ? '720x1280' : params.aspectRatio === '1:1' ? '1024x1024' : '1280x720',
+          draftMode: Boolean(params.draftMode),
           skipBilling: true,
           internalTeamId: record.teamId,
           internalUserId: record.userId,
@@ -393,6 +408,8 @@ async function processTask(id: number, config: AIConfig) {
         seed: params.seed,
         promptExtend: params.promptExtend,
         watermark: params.watermark,
+        draftMode: params.draftMode,
+        speedTier: params.speedTier,
       }))
     }
 

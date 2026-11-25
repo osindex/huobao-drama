@@ -58,6 +58,7 @@ export const authAPI = {
     allow_invite_register?: boolean
     register_bonus_credits?: number
     billing_enabled?: boolean
+    public_base_url_configured?: boolean
     user?: {
       id: number
       username: string
@@ -125,6 +126,8 @@ export const storyboardAPI = {
   del: (id: number) => api.del(`/storyboards/${id}`),
   extractFrame: (id: number, data?: { position?: 'first' | 'last' | 'timestamp'; timestamp?: number; source_video_url?: string; apply_to?: 'first_frame' | 'last_frame' | 'next_first_frame' | 'none'; target_storyboard_id?: number }) =>
     api.post<{ path: string; url: string; updated_storyboard_id: number | null; updated_field: string | null }>(`/storyboards/${id}/extract-frame`, data || {}),
+  slowMotion: (id: number, data?: { speed?: number; fps?: number; mode?: 'optical_flow' | 'blend'; mute_audio?: boolean; source_video_url?: string; apply?: boolean }) =>
+    api.post<{ task_id: number; path: string; url: string; duration: number; storyboard_duration: number; source_duration: number | null; speed: number; fps: number; mode: string; applied: boolean }>(`/storyboards/${id}/slow-motion`, data || {}),
 }
 
 export const characterAPI = {

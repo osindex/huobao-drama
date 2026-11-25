@@ -64,7 +64,11 @@ app.get('/estimate', (c) => {
   const model = c.req.query('model') || ''
   const duration = Number(c.req.query('duration') || 5)
   const resolution = c.req.query('resolution') || '720p'
-  const credits = estimateCredits({ serviceType, provider, model, duration, resolution })
+  const draftRaw = c.req.query('draft_mode')
+  const draftMode = draftRaw === '1' || draftRaw === 'true'
+  const audioRaw = c.req.query('generate_audio')
+  const generateAudio = audioRaw == null ? undefined : !(audioRaw === '0' || audioRaw === 'false')
+  const credits = estimateCredits({ serviceType, provider, model, duration, resolution, draftMode, generateAudio })
   return success(c, { credits })
 })
 
