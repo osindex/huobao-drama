@@ -2,6 +2,9 @@
   <div class="studio" v-if="drama">
     <header class="studio-topbar">
       <div class="studio-topbar-main">
+        <NuxtLink to="/" class="studio-brand" title="青果短剧 · 返回项目列表" aria-label="青果短剧 · 返回项目列表">
+          <img :src="brandLogo" alt="青果短剧" width="28" height="28" />
+        </NuxtLink>
         <button class="back-btn topbar-back" @click="navigateTo(`/drama/${dramaId}`)">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
             <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
@@ -1876,6 +1879,7 @@ import { startTour, autoTour } from '~/composables/useTour'
 import { useAgent } from '~/composables/useAgent'
 import { resolveTextModelSelection } from '~/utils/text-model-selection'
 import { toastError, mapError, MODERATION_RE } from '~/composables/useToast'
+import brandLogo from '~/assets/qingguo-logo.svg'
 import LocaleSwitcher from '~/components/LocaleSwitcher.vue'
 import DirectorCanvas from '~/components/canvas/DirectorCanvas.vue'
 import CollageComposerModal from '~/components/canvas/CollageComposerModal.vue'
@@ -4739,6 +4743,10 @@ onMounted(() => setTimeout(() => autoTour('episode', EPISODE_TOUR, t), 900))
   background: transparent;
   min-width: 0;
 }
+
+.studio-brand { display: flex; flex-shrink: 0; border-radius: 7px; }
+.studio-brand img { display: block; }
+.studio-brand:focus-visible { outline: 2px solid #69ce86; outline-offset: 2px; }
 
 /* 用更高特异性压过后面的 .back-btn{height:40px}，保持顶栏紧凑 */
 .studio-topbar .topbar-back {

@@ -3,89 +3,93 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>登录 / 注册 · 火宝短剧</title>
+  <title>登录 / 注册 · 青果短剧</title>
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
     body {
       margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px 16px;
-      background: radial-gradient(circle at 50% 0%, #2b1d12 0%, #14120f 55%);
-      color: #f6f1ea;
+      background: radial-gradient(ellipse at 50% 0%, #1d4433 0%, #0b1511 65%);
+      color: #eef5ef;
       font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
     }
     .card {
-      width: min(420px, 100%);
-      padding: 30px 28px;
-      border-radius: 18px;
-      background: rgba(33, 30, 26, 0.94);
-      border: 1px solid #3a342c;
-      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+      width: min(420px, 100%); padding: 30px 28px; border-radius: 18px;
+      background: rgba(19, 32, 26, 0.96); border: 1px solid #2c4738;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.4);
     }
-    .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
-    .brand-dot {
-      width: 28px; height: 28px; border-radius: 8px;
-      background: linear-gradient(135deg, #f97316, #fb923c);
-      display: grid; place-items: center; color: #1a1008; font-weight: 800; font-size: 15px;
-    }
-    h1 { margin: 0; font-size: 20px; letter-spacing: 0.2px; }
-    .sub { margin: 0 0 20px; color: #b7ab9d; font-size: 12.5px; }
+    .brand { display: flex; align-items: center; gap: 13px; margin-bottom: 18px; }
+    .brand-logo { width: 52px; height: 52px; flex-shrink: 0; }
+    .brand-caption { margin: 4px 0 0; color: #91ad9e; font-size: 10px; letter-spacing: 2px; }
+    h1 { margin: 0; font-size: 23px; letter-spacing: 1px; }
+    .sub { margin: 0 0 20px; color: #a1b5a7; font-size: 12.5px; }
     .tabs {
       display: flex; gap: 6px; padding: 4px; border-radius: 11px;
-      background: #161411; border: 1px solid #2f2a24; margin-bottom: 20px;
+      background: #0e1c15; border: 1px solid #283e30; margin-bottom: 20px;
     }
     .tab {
       flex: 1; padding: 8px 10px; border: 0; border-radius: 8px;
-      background: transparent; color: #a79a8b; font: 600 13px/1.2 inherit; cursor: pointer;
-      transition: all .15s ease;
+      background: transparent; color: #a1b5a7; font: inherit; font-weight: 600; cursor: pointer;
+      transition: background .15s ease, color .15s ease;
     }
-    .tab.active {
-      background: #2c2620; color: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.25);
-    }
+    .tab.active { background: #294333; color: #e2f8d1; box-shadow: 0 2px 6px rgba(0,0,0,.25); }
     .field { margin-bottom: 14px; }
-    label { display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 12px; color: #c7bcb0; }
-    label span.opt { color: #85796b; font-weight: 400; }
+    label { display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 12px; color: #c1d1c5; }
+    label span.opt { color: #91a79a; font-weight: 400; }
     input {
       width: 100%; padding: 10px 12px; border-radius: 10px;
-      border: 1px solid #453e35; background: #14120f; color: #f6f1ea; font: inherit;
+      border: 1px solid #365040; background: #0b1710; color: #eef5ef; font: inherit;
       outline: none; transition: border-color .15s;
     }
-    input:focus { border-color: #f97316; }
+    input:focus { border-color: #a4e372; }
+    button:focus-visible { outline: 2px solid #a4e372; outline-offset: 3px; }
     .primary-btn {
       width: 100%; margin-top: 8px; padding: 11px 16px; border: 0; border-radius: 999px;
-      background: linear-gradient(135deg, #f97316, #fb923c); color: #1a1008;
-      font: 700 14px/1.2 inherit; cursor: pointer; transition: opacity .15s, transform .1s;
+      background: linear-gradient(110deg, #b5ea76, #69ce86); color: #102b1c;
+      font: inherit; font-weight: 700; cursor: pointer; transition: opacity .15s, transform .1s;
     }
     .primary-btn:active { transform: translateY(1px); }
     .primary-btn:disabled { opacity: .55; cursor: default; }
     .ghost-btn {
       width: 100%; margin-top: 10px; padding: 9px 14px; border-radius: 999px;
-      border: 1px solid #453e35; background: transparent; color: #cfc4b8;
-      font: 500 13px/1.2 inherit; cursor: pointer;
+      border: 1px solid #365040; background: transparent; color: #c1d1c5;
+      font: inherit; cursor: pointer;
     }
     .banner {
       padding: 10px 12px; border-radius: 10px; margin-bottom: 16px; font-size: 12.5px;
-      border: 1px solid #4a3928; background: rgba(249, 115, 22, 0.1); color: #fdba74;
+      border: 1px solid #3b5734; background: rgba(164, 227, 114, 0.08); color: #b5ea90;
     }
-    .banner.ok {
-      border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.1); color: #86efac;
-    }
-    .banner.warn {
-      border-color: rgba(248, 113, 113, 0.35); background: rgba(248, 113, 113, 0.1); color: #fca5a5;
-    }
+    .banner.ok { border-color: rgba(34, 197, 94, 0.35); background: rgba(34, 197, 94, 0.1); color: #86efac; }
+    .banner.warn { border-color: rgba(248, 113, 113, 0.35); background: rgba(248, 113, 113, 0.1); color: #fca5a5; }
     .msg { min-height: 20px; margin-top: 12px; font-size: 13px; text-align: center; }
     .msg.error { color: #ff8d8d; }
     .msg.ok { color: #86efac; }
     .hidden { display: none !important; }
-    .foot-note { margin-top: 16px; padding-top: 14px; border-top: 1px solid #2e2923; font-size: 12px; color: #85796b; text-align: center; }
+    .foot-note { margin-top: 16px; padding-top: 14px; border-top: 1px solid #283e30; font-size: 12px; color: #91a79a; text-align: center; }
   </style>
 </head>
 <body>
   <div class="card">
     <div class="brand">
-      <div class="brand-dot">火</div>
-      <h1>火宝短剧创作平台</h1>
+      <!-- Inline copy of frontend/app/assets/qingguo-logo.svg: visible before authentication. -->
+      <svg class="brand-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none" role="img" aria-label="青果短剧 LOGO">
+        <defs>
+          <linearGradient id="tile" x1="28" y1="12" x2="230" y2="252" gradientUnits="userSpaceOnUse"><stop stop-color="#183F35"/><stop offset="1" stop-color="#09291F"/></linearGradient>
+          <linearGradient id="fruit" x1="78" y1="77" x2="183" y2="211" gradientUnits="userSpaceOnUse"><stop stop-color="#C4F27B"/><stop offset="0.5" stop-color="#8EDC64"/><stop offset="1" stop-color="#46BB79"/></linearGradient>
+        </defs>
+        <rect x="4" y="4" width="248" height="248" rx="60" fill="url(#tile)"/>
+        <rect x="5" y="5" width="246" height="246" rx="59" stroke="#FFFFFF" stroke-opacity="0.1" stroke-width="2"/>
+        <path d="M128 69C129 46 148 31 178 34C176 57 156 73 128 69Z" fill="#B5EA76"/>
+        <path d="M123 77C121 64 115 55 107 51" stroke="#71C688" stroke-width="9" stroke-linecap="round"/>
+        <path d="M128 83C111 72 86 75 69 90C51 106 48 129 54 152C62 184 89 211 113 214C120 215 125 212 128 212C131 212 136 215 143 214C167 211 194 184 202 152C208 129 205 106 187 90C170 75 145 72 128 83Z" fill="url(#fruit)"/>
+        <path d="M111 116C111 111 115 109 119 112L158 136C162 138 162 143 158 146L119 170C115 172 111 170 111 166V116Z" fill="#103C2E"/>
+      </svg>
+      <div>
+        <h1>青果短剧</h1>
+        <p class="brand-caption">QINGGUO SHORTS</p>
+      </div>
     </div>
-    <p class="sub">多团队协作短剧工作台 · 支持算力池共享与独立项目权限</p>
+    <p class="sub">让灵感生长，让故事成片。<br />从剧本到银幕，与团队一起创作。</p>
 
     <div id="inviteBanner" class="banner hidden"></div>
 
@@ -150,11 +154,25 @@
       <div class="msg error" id="formMsg"></div>
     </div>
 
-    <div class="foot-note">静态生成的图片与视频直链保持免密可访问，不影响上游模型参考拉取</div>
+    <div class="foot-note">青果短剧 · AI 短剧创作工作台</div>
   </div>
 
   <script>
+    // 登录页的图标也内嵌，避免未登录请求受保护的前端资源。
+    const favicon = document.createElement('link')
+    favicon.rel = 'icon'
+    favicon.type = 'image/svg+xml'
+    favicon.href = 'data:image/svg+xml,' + encodeURIComponent(document.querySelector('.brand-logo').outerHTML)
+    document.head.appendChild(favicon)
+
     const ROLE_LABELS = { owner: '所有者', admin: '管理员', member: '正式成员', viewer: '只读访客' }
+
+    // 后端成功响应体为 { code: 200|201, message: 'success' }；只有非 2xx 才算失败
+    function apiFailed(resp, json) {
+      if (!resp.ok) return true
+      const code = Number(json && json.code)
+      return Number.isFinite(code) && code !== 0 && (code < 200 || code >= 300)
+    }
     const params = new URLSearchParams(location.search)
     const urlInvite = (params.get('invite') || params.get('code') || '').trim()
 
@@ -304,7 +322,7 @@
           body: JSON.stringify({ code: urlInvite }),
         })
         const json = await resp.json().catch(() => ({}))
-        if (!resp.ok || (json.code && json.code !== 0)) {
+        if (apiFailed(resp, json)) {
           throw new Error(json.message || '加入团队失败')
         }
         location.replace('/')
@@ -334,7 +352,7 @@
           body: JSON.stringify(payload),
         })
         const json = await resp.json().catch(() => ({}))
-        if (!resp.ok || (json.code && json.code !== 0)) {
+        if (apiFailed(resp, json)) {
           throw new Error(json.message || '登录失败')
         }
         location.replace('/')
@@ -369,7 +387,7 @@
           body: JSON.stringify(payload),
         })
         const json = await resp.json().catch(() => ({}))
-        if (!resp.ok || (json.code && json.code !== 0)) {
+        if (apiFailed(resp, json)) {
           throw new Error(json.message || '注册失败')
         }
         location.replace('/')

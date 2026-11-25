@@ -114,6 +114,47 @@ test('real login/logout, CSRF, expiry, body limits, throttling and secret-free l
   }
 })
 
+test('login page treats real success responses as success and real errors as failure', async () => {
+  process.env.AUTH_PASSWORD = 'test-password'
+  // 上一个用例故意打满了登录限流；跳到限流窗口之后
+  const originalNow = Date.now
+  Date.now = () => originalNow() + 61_000
+  try {
+    const html = await fs.readFile(new URL('../src/login.html', import.meta.url), 'utf8')
+    const source = /function apiFailed\(resp, json\) \{[\s\S]*?\n    \}/.exec(html)?.[0]
+    assert.ok(source, 'login.html must define apiFailed(resp, json)')
+    const apiFailed = new Function(`${source}; return apiFailed`)() as (resp: Response, json: unknown) => boolean
+    // 三处提交（登录 / 注册 / 接受邀请）必须都走同一判断
+    assert.equal(html.match(/if \(apiFailed\(resp, json\)\)/g)?.length, 3)
+
+    const api = app()
+    const post = (url: string, body: unknown) => api.request(url, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    })
+
+    const registered = await post('/api/v1/auth/register', { username: 'login_page_user', password: 'secret-pass' })
+    const registeredJson = await registered.json()
+    assert.equal(registered.status, 200)
+    assert.equal(registeredJson.message, 'success')
+    assert.equal(apiFailed(registered, registeredJson), false)
+    assert.ok(registered.headers.get('set-cookie'))
+
+    const loggedIn = await post('/api/v1/auth/login', { username: 'login_page_user', password: 'secret-pass' })
+    assert.equal(apiFailed(loggedIn, await loggedIn.json()), false)
+
+    const duplicate = await post('/api/v1/auth/register', { username: 'login_page_user', password: 'secret-pass' })
+    assert.equal(apiFailed(duplicate, await duplicate.json()), true)
+    const wrong = await post('/api/v1/auth/login', { username: 'login_page_user', password: 'nope' })
+    assert.equal(apiFailed(wrong, await wrong.json()), true)
+
+    assert.equal(apiFailed(new Response('', { status: 200 }), {}), false)
+    assert.equal(apiFailed(new Response('', { status: 200 }), { code: 500, message: 'x' }), true)
+  } finally {
+    Date.now = originalNow
+    delete process.env.AUTH_PASSWORD
+  }
+})
+
 test.after(async () => {
   sqlite.close()
   await fs.rm(root, { recursive: true, force: true })

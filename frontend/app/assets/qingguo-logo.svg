@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none">
+  <title>青果短剧 · Qingguo Shorts</title>
+  <defs>
+    <linearGradient id="tile" x1="28" y1="12" x2="230" y2="252" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#183F35"/>
+      <stop offset="1" stop-color="#09291F"/>
+    </linearGradient>
+    <linearGradient id="fruit" x1="78" y1="77" x2="183" y2="211" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#C4F27B"/>
+      <stop offset="0.5" stop-color="#8EDC64"/>
+      <stop offset="1" stop-color="#46BB79"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="248" height="248" rx="60" fill="url(#tile)"/>
+  <rect x="5" y="5" width="246" height="246" rx="59" stroke="#FFFFFF" stroke-opacity="0.1" stroke-width="2"/>
+  <path d="M128 69C129 46 148 31 178 34C176 57 156 73 128 69Z" fill="#B5EA76"/>
+  <path d="M123 77C121 64 115 55 107 51" stroke="#71C688" stroke-width="9" stroke-linecap="round"/>
+  <path d="M128 83C111 72 86 75 69 90C51 106 48 129 54 152C62 184 89 211 113 214C120 215 125 212 128 212C131 212 136 215 143 214C167 211 194 184 202 152C208 129 205 106 187 90C170 75 145 72 128 83Z" fill="url(#fruit)"/>
+  <path d="M111 116C111 111 115 109 119 112L158 136C162 138 162 143 158 146L119 170C115 172 111 170 111 166V116Z" fill="#103C2E"/>
+</svg>
